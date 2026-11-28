@@ -41,6 +41,8 @@ The MYGA SEC comparison runs the same cash-flow projection in live modelx, expor
 | Live modelx | 14 | 751.66 [751.34–751.88] | 123.23 [122.91–123.62] | 83.6% |
 | Exported Python | 14 | 140.30 [140.27–140.69] | 102.09 [101.85–102.13] | 27.2% |
 | Compiled | 14 | 116.57 [116.45–116.62] | 104.14 [104.05–104.32] | 10.7% |
+| Exported Python | 1,050 | 3,291.62 [3,291.30–3,291.71] | 102.76 [102.65–102.88] | 96.9% |
+| Compiled | 1,050 | 1,208.00 [1,207.98–1,208.02] | 104.29 [104.21–104.84] | 91.4% |
 
 The elapsed-time runs use equal books within each mode and delete each Direct policy item inside the timed interval. One-worker Direct also runs generation-zero GC every 64 policies. The separate full SEC DV01 comparison starts from the input CSV directory and checks all 72 values against the live reference. [Matched performance evidence](REFRESH.md)
 

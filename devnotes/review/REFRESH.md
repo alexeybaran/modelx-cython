@@ -1,13 +1,18 @@
 # Performance refresh on the review heads
 
-The refresh runs on a WSL2 laptop with eight physical Ryzen 7 5800H cores, free-threaded CPython 3.14.8 and Cython 3.3.2. It verifies the GIL stays off. The [review branches](README.md) supply the exact source pins. [Earlier measurements](PERFORMANCE.md) retain their original toolchain and source pins.
+The refresh runs on Ubuntu 24.04 under WSL2 kernel `6.18.33.2-microsoft-standard-WSL2`, with eight physical Ryzen 7 5800H cores, free-threaded CPython 3.14.8, Cython 3.3.2, GCC 13.3.0, NumPy 2.5.5 and pandas 3.1.1. It verifies the GIL stays off. The [review branches](README.md) supply the exact source pins. [Earlier measurements](PERFORMANCE.md) retain their original toolchain and source pins.
 
 | Workload | Matched comparison | Measurements |
 | --- | --- | --- |
 | All 12 released SEC products | Fast SEC and upstream compiler `d22426fbac8637f84510902c2fa33b6466e5acb4` with modelx `fec516d7e9b5813e7d40819a72731bd35fc2972f` and unchanged lifelib `20d4daef3281d538b3fbda6d0fb951fcceb3a6f4` | Direct wall time per policy, process CPU, native instructions, peak RSS, translation and C build time. A failed upstream build gets an explicit row. |
 | MYGA SEC | Direct and Collect in live modelx, exported Python and compiled code. Separate compiler Direct comparison between Fast SEC and Collect heads. | Equal-book time with Direct policy deletion. Separate retained-state peak RSS with no deletion. Exported and compiled four-worker timing. |
+| RILA and DIA SEC | Compiled Direct and Collect on the Collect branch, with Fast SEC's one-worker Direct on the same input. | One and four workers, one-worker instructions, and translation and C-build time. |
 | Full SEC DV01 and CS01 report | Fast SEC Direct and Collect-branch Direct and Collect on the corresponding rebased examples and the same ordered 1,050-policy book. | One and four workers. Wall time, process CPU, peak RSS and one-worker instructions. The timed Collect route calls a portfolio report Cell with the CSV input directory. |
 
 Each matched elapsed comparison uses five alternating fresh-process rounds with no active builds. One-worker runs are pinned to distinct physical cores. Four-worker results use an isolated run on four physical cores. Instructions come from separate one-worker hardware-counter runs with event coverage checked. Each Direct policy value and Collect total is checked against live outputs. The full DV01 benchmark checks all 72 DV01 and CS01 values. Peak RSS uses the child's own high-water mark.
 
 The SEC books are sized for several seconds on Fast SEC. The compiled MYGA comparison uses the same book at both worker counts. The higher-policy MYGA memory comparison covers exported and compiled modes. Live Direct retains a much larger per-policy dependency graph, so the live memory comparison uses the smaller common book.
+
+The completed MYGA retained-state comparison is in [the Collect description](COMPILER-COLLECT.md). The timing drivers load the policy table before starting the MYGA stopwatch to verify the book size. The full DV01 report starts with its authored calculation and uses the CSV directory supplied to the model.
+
+On the 34,300-policy MYGA book, Fast SEC Direct used 2,080,596 instructions per policy and the Collect compiler's Direct route used 2,080,600. Native Collect used 1,877,121, 9.8% below Direct. The upstream compiler's Direct control used 8,456,011. These are medians of two fresh one-worker instruction runs, each checked against live cash flows.
