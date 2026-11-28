@@ -105,13 +105,13 @@ All wall and RSS entries are median [minimum–maximum] across five fresh proces
 
 ## Full SEC DV01 and CS01 report
 
-Each round uses 1,050 policies, one ESG path, three closes and 12 key tenors. It checks all 72 report values.
+Each round uses 1,050 policies and one ESG path. Each policy runs one Actual projection and 39 Valuation projections, with one base and 12 shocks at each of three closes. The wall time per policy-scenario divides the full report time by 42,000 projections. Each round checks all 72 report values.
 
-| Branch | Route | Workers | Wall seconds | CPU seconds | Peak MiB | Instructions/policy |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Fast SEC | Direct | 1 | 14.664 [14.009–14.761] | 14.458 [13.849–14.488] | 258.2 [258.1–258.2] | 82,738,337 [82,738,315–82,738,359] |
-| Fast SEC | Direct | 4 | 3.530 [3.479–3.677] | 12.647 [12.371–13.242] | 356.7 [329.8–365.4] | — |
-| Collect | Direct | 1 | 13.964 [13.631–14.197] | 13.515 [13.326–13.816] | 258.7 [258.6–258.8] | 82,218,660 [82,217,214–82,220,105] |
-| Collect | Direct | 4 | 3.489 [3.407–3.709] | 12.516 [12.180–13.302] | 349.7 [336.0–358.8] | — |
-| Collect | Collect | 1 | 11.473 [11.321–12.080] | 11.344 [11.162–11.827] | 171.6 [171.6–171.9] | 80,520,875 [80,520,534–80,521,216] |
-| Collect | Collect | 4 | 3.085 [3.062–3.127] | 10.685 [10.602–10.803] | 180.9 [180.7–182.3] | — |
+| Branch | Route | Workers | Wall seconds | Wall µs/policy-scenario | CPU seconds | Peak MiB | Instructions/policy |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Fast SEC | Direct | 1 | 14.664 [14.009–14.761] | 349.1 [333.5–351.4] | 14.458 [13.849–14.488] | 258.2 [258.1–258.2] | 82,738,337 [82,738,315–82,738,359] |
+| Fast SEC | Direct | 4 | 3.530 [3.479–3.677] | 84.1 [82.8–87.5] | 12.647 [12.371–13.242] | 356.7 [329.8–365.4] | — |
+| Collect | Direct | 1 | 13.964 [13.631–14.197] | 332.5 [324.5–338.0] | 13.515 [13.326–13.816] | 258.7 [258.6–258.8] | 82,218,660 [82,217,214–82,220,105] |
+| Collect | Direct | 4 | 3.489 [3.407–3.709] | 83.1 [81.1–88.3] | 12.516 [12.180–13.302] | 349.7 [336.0–358.8] | — |
+| Collect | Collect | 1 | 11.473 [11.321–12.080] | 273.2 [269.5–287.6] | 11.344 [11.162–11.827] | 171.6 [171.6–171.9] | 80,520,875 [80,520,534–80,521,216] |
+| Collect | Collect | 4 | 3.085 [3.062–3.127] | 73.4 [72.9–74.5] | 10.685 [10.602–10.803] | 180.9 [180.7–182.3] | — |

@@ -25,7 +25,7 @@ The generated-source tests now inspect the relevant calls and operands through t
 
 All 12 released SEC products build on both compilers and match live modelx when both use lifelib's documented native build settings. Fast SEC runs **2.71–6.16× as fast** and uses **55–76% fewer instructions per policy** across the twelve pairs. Each pair uses the Direct route with one worker and the same ordered book. Times are medians of five alternating fresh-process rounds on WSL2, with free-threaded CPython 3.14.8, the GIL off and Cython 3.3.2.
 
-| SEC product | Policies | Upstream µs/policy | Fast SEC µs/policy | Fast SEC / upstream instructions | Elapsed speedup |
+| SEC product | Policies | Upstream µs/projection | Fast SEC µs/projection | Fast SEC / upstream instructions | Elapsed speedup |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | DIA | 12,000 | 1,293.8 | 477.0 | 0.455× | 2.71× |
 | FIA | 10,900 | 1,644.8 | 351.6 | 0.314× | 4.68× |
@@ -39,11 +39,11 @@ All 12 released SEC products build on both compilers and match live modelx when 
 | VA | 8,000 | 2,698.8 | 516.1 | 0.259× | 5.23× |
 | VUL | 5,300 | 3,566.2 | 808.8 | 0.341× | 4.41× |
 | WholeLife | 13,900 | 1,272.5 | 266.5 | 0.296× | 4.77× |
-| SEC DV01 full report | 1,050 | — | 13,965.7 | — | — |
+| SEC DV01 full report | 1,050 | — | 349.1 | — | — |
 
 Lifelib's build sets `infer_types=True, cpow=True` on the generated Cython class module and uses `-ffp-contract=off` with GCC. Applying these settings to both arms restored the DIA and VUL upstream builds. Upstream instruction counts also fell for all ten products that had compiled under the generic recipe, by 2.3–31.8%. The largest changes were SPIA, IUL and VA. [Build procedure and per-product comparison](SEC-BUILD-BENCHMARKS.md)
 
-The SEC DV01 row measures a full report with one ESG path and three closes. Fast SEC took 14.664 s at one worker and 3.530 s at four, with all 72 results matching live modelx bit for bit. The example requires dynamic Reference export and has no matched upstream result.
+Each released SEC timing divides by the number of policies, with one projection per policy. The full SEC DV01 report has one Actual projection plus 39 Valuation projections per policy across one ESG path. Each of the three closes runs one base and 12 shocked valuations. Dividing the full report time by **42,000 policy-scenarios** gives **349.1 µs** at one worker (14.664 s total) and **84.1 µs** at four (3.530 s total). All 72 results matched live modelx bit for bit. The example requires dynamic Reference export and has no matched upstream result.
 
 The detailed benchmark report includes elapsed ranges, peak RSS, translation time and native build time. All 12 exact review CI jobs passed across Windows, Linux and macOS on standard Python 3.12 and free-threaded Python 3.14. [Released SEC report](SEC-BUILD-BENCHMARKS.md) · [SEC DV01 results](REFRESH.md#full-sec-dv01-and-cs01-report) · [Exact CI](https://github.com/alexeybaran/modelx-cython/actions/runs/46147767105)
 
