@@ -33,6 +33,8 @@ def describe(module_infos):
                     cache = 'dense'
                 elif cell.uses_native_numeric_cache:
                     cache = 'native-numeric-keys'
+                elif cell.uses_vector_cache:
+                    cache = 'vector-dense'
                 else:
                     cache = 'dictionary'
                 reasons = []
@@ -65,18 +67,37 @@ def describe(module_infos):
                         axis.key: [int(axis.lower), int(axis.stop)] for axis in cell.associative_logical_axes
                     } if cache in ('native-numeric-keys', 'dictionary') else {},
                     'declared_sizes': _declared_sizes(cls, cell) if cache != 'none' else {},
+                    'enum_domains': {name: f'{e[0]}.{e[1]} ({e[2]} members)' for name, e
+                                     in getattr(getattr(cell, '_rt', None), 'enum_args', {}).items()},
                     'numeric_primary_capacity': primary_capacity(cell)
                     if cache == 'native-numeric-keys' else 0,
                     'power_memo': bool(getattr(cell, 'power_memo', None)),
                     'dense_offsets': [int(offset) for offset in cell.cache_offsets]
                     if cache == 'dense' else [],
                     'exact_spill': cache == 'dense' and bool(cell.has_dense_spill),
+                    'nogil_qualified': False,
                     'native_helpers': getattr(cell, 'native_helpers', []),
-                    'native_expressions': getattr(cell, 'math_native', 0),
-                    'expressions_untyped': getattr(cell, 'math_untyped', []),
+                    'table_reads_typed': getattr(cell, 'table_reads_typed', 0),
+                    'table_reads_untyped': getattr(cell, 'table_reads_untyped', []),
+                    'record_reads_untyped': getattr(cell, 'record_reads_untyped', []),
+                    'table_reads_keys': getattr(cell, 'table_reads_keys', []),
+                    'native_reductions': getattr(cell, 'native_reductions', 0),
+                    **({'collect_outputs': cell.collect_leaves} if getattr(cell, 'collect_leaves', None) else {}),
+                    'native_enum_comparisons': getattr(cell, 'native_enum_comparisons', 0),
+                    'native_enum_constants': getattr(cell, 'native_enum_constants', 0),
+                    'row_fields_inlined': getattr(cell, 'row_fields_inlined', 0),   # diag-run8 F3
+                    'row_cell_inlined': getattr(cell, 'row_cell_inlined', False),
+                    'row_cell_kept': getattr(cell, 'row_cell_kept', None),
+                    'native_tuple_int_loops': getattr(cell, 'native_tuple_int_loops', 0),
+                    'native_expressions': sum(getattr(cell, key, 0) for key in (
+                        'reductions_native', 'enum_memberships', 'math_native')),
+                    'expressions_untyped': expressions_untyped(cell),
+                    'powers_in_loops': list(getattr(cell, 'powers_in_loops', ())),
                     'guarded_integer_ops': getattr(cell, 'guarded_integer_ops', 0),
                     'object_locals': [{'local': name, 'reason': 'compared by identity (is / is not)'}
                                       for name in getattr(cell, 'python_object_locals', ())],
+                    'expressions_object': expressions_object(cell),
+                    **({'vectors': cell.vector_report} if getattr(cell, 'vector_report', None) else {}),
                     'cache_detail': cache_detail(cell, cache),
                     'slow_paths': slow_paths(cell, cache),
                     'reasons': reasons or ['original Cython representation'],
@@ -106,7 +127,7 @@ OVER_LIMIT_WARNING = ('{cell}: window {window} (traced {ranges}) = {count:,} ent
 
 
 def over_limit_warning(cell):
-    """The build warning for a hash-cached Cell whose integer window exceeds the dense limit, else None."""
+    """D135: the build warning for a hash-cached Cell whose integer window exceeds the dense limit, else None."""
     if not (cell.has_args() and cell.has_typeinfo() and cell.uses_native_numeric_cache and cell.is_int_args):
         return None
     from .automatic import max_dense_entries
@@ -192,8 +213,8 @@ def store_reason(cell, cache):
 
 
 def cache_detail(cell, cache):
-    """The cache of a Cell with parameters: kind, window, entries, bytes, and why it is not dense
-    (one storage for the Cell, whatever calls it)."""
+    """The cache of a Cell with parameters: kind, window, entries, bytes, and why it is not dense (D74;
+    D135: one storage on every route, no collect-only window)."""
     if not cell.params or cache in ('none', 'scalar'):
         return {'kind': cache}
     detail = {'kind': cache}
@@ -209,11 +230,19 @@ def cache_detail(cell, cache):
             window, sizes, count = _window(cell.dense_axes)
             detail.update(window=window, entries=count, bytes=count * 12)
             return detail
+        if cache == 'vector-dense':
+            from .vectors import vector_cache_plan
+            axes, count, size = vector_cache_plan(cell.parent)[0][cell.name]
+            detail.update(window=_window(axes)[0], entries=count, bytes=size)
+            return detail
         if cache not in ('native-numeric-keys', 'dictionary'):
             return detail
         from .automatic import max_dense_entries
         limit = max_dense_entries(cell)
-        if cache == 'dictionary':
+        vector_refused = (vector_refusal(cell) if cache == 'dictionary' else None)
+        if vector_refused:
+            detail['hash_reason'] = vector_refused
+        elif cache == 'dictionary':
             detail['hash_reason'] = ('return or parameter types are not native numbers'
                                      if cell.has_typeinfo() else 'formula not observed by the sample')
         elif not cell.is_int_args:
@@ -229,8 +258,19 @@ def cache_detail(cell, cache):
     return detail
 
 
+def vector_refusal(cell):
+    """Why a vector cell with parameters is not on a VecCache (budget or window), else None."""
+    if not getattr(cell, 'vector_shape', None) or getattr(cell, 'parent', None) is None:
+        return None
+    try:
+        from .vectors import vector_cache_plan
+        return vector_cache_plan(cell.parent)[1].get(cell.name)
+    except Exception:       # a class info without cells: no plan
+        return None
+
+
 def slow_paths(cell, cache):
-    """Work of a compiled formula that still runs on Python objects or a slow cache,
+    """diag-jp: work of a compiled formula that still runs on Python objects or a slow cache,
     which the other report keys do not flag as such: a cell with parameters on a hash or
     dictionary cache (and why it is not dense), lowered reductions that iterate or add Python
     objects, table reads whose key parts are Python objects, powers left on Python semantics in
@@ -240,7 +280,12 @@ def slow_paths(cell, cache):
     entries = []
     if per_step and cache in ('native-numeric-keys', 'dictionary'):
         detail = f'{cache} cache'
+        refused = vector_refusal(cell) if cache == 'dictionary' else None
+        if refused:
+            detail += f': {refused}'
         try:
+            if refused:
+                raise LookupError(refused)
             from .automatic import max_dense_entries
             limit = max_dense_entries(cell)
             axes = list(getattr(cell, 'associative_logical_axes', ()) or ())
@@ -255,7 +300,222 @@ def slow_paths(cell, cache):
         except Exception:       # an axis without bounds: the cache kind alone
             pass
         entries.append({'kind': 'hash-cache', 'detail': detail, 'per_step': per_step})
-    if per_step and cache != 'none' and cell.get_rettype_expr(c_style=True) == 'object':
+    for entry in getattr(cell, 'reductions_object', ()) or ():
+        entries.append({'kind': 'reduction-on-objects', 'detail': f"line {entry['line']}: {entry['expr']}: "
+                        f"{entry['reason']}", 'per_step': per_step})
+    for key in getattr(cell, 'table_reads_keys', ()) or ():
+        if 'object (' in key:
+            entries.append({'kind': 'table-key-object', 'detail': key, 'per_step': per_step})
+    for entry in getattr(cell, 'record_reads_untyped', ()) or ():
+        # D78: record field reads left on Python objects (no held record handle)
+        entries.append({'kind': 'record-read-object', 'detail': f"{entry['read']}: {entry['reason']}",
+                        'per_step': per_step})
+    for power in getattr(cell, 'powers_in_loops', ()) or ():
+        entries.append({'kind': 'power-on-objects-in-loop', 'detail': power, 'per_step': per_step})
+    if per_step and cache != 'none' and cell.get_rettype_expr(c_style=True) == 'object' and (
+            getattr(cell, 'vector_report', None) is None):
         entries.append({'kind': 'object-return', 'detail': 'returns a Python object on every call '
                         '(boxed at the cell boundary)', 'per_step': per_step})
     return entries
+
+
+def expressions_untyped(cell):
+    """Expression forms (W1.4) left to the interpreter: reductions, n-argument
+    min/max, enum membership and math calls, each with its line and reason."""
+    entries = [entry for key in ('reductions_untyped', 'enum_untyped', 'minmax_untyped', 'math_untyped')
+               for entry in getattr(cell, key, ())]
+    return sorted(entries, key=lambda entry: (entry['line'], entry['form'], entry['expr']))
+
+
+def expressions_object(cell):
+    """Built-in forms (W1.8) compiled with comparisons or calls on Python objects, because
+    an operand's class is not known at build time; each with its line and the operand
+    classes. They no longer call the built-in."""
+    entries = [entry for key in ('reductions_object', 'enum_object', 'math_object')
+               for entry in getattr(cell, key, ())]
+    return sorted(entries, key=lambda entry: (entry['line'], entry['form'], entry['expr']))
+
+
+# ---------------------------------------------------------------- M1 table reads (W1.1)
+TABLE_READ_ATTRS = ('loc', 'at', 'index', 'iterrows')
+NOT_LOWERED = 'not lowered to a typed handle read; runs as a Python call'
+PANDAS_RECEIVER = ('receiver is a pandas DataFrame, Series or Index, not a helper Table: never lowered; '
+                   'pandas runs on every evaluation')
+TABLE_READ_WARNING = '{cell}: per-step table read is not typed: {read} (formula line {line}): {reason}'
+
+
+def untyped_read_warning(cell, entry):
+    """Build warning text for one per-step untyped read (an entry of table_reads_untyped)."""
+    return TABLE_READ_WARNING.format(cell=cell, **entry)
+
+
+def _binds_local(statement, local):
+    """Whether an Assign/AnnAssign binds only names tracked as receiver locals."""
+    import libcst as cst
+    targets = ([t.target for t in statement.targets] if isinstance(statement, cst.Assign)
+               else [statement.target])
+    return all(isinstance(t, cst.Name) and t.value in local for t in targets)
+
+
+class TableReadSite:
+    """One pandas-spelled read on a traced helper Table in a formula (before lowering)."""
+    __slots__ = ('node', 'kind', 'read', 'line')
+
+    def __init__(self, node, kind, read, line):
+        self.node, self.kind, self.read, self.line = node, kind, read, line
+
+    def entry(self, per_step, reason=None):
+        return {'read': self.read, 'kind': self.kind, 'line': self.line,
+                'per_step': per_step, 'reason': reason or NOT_LOWERED}
+
+
+def table_read_sites(node, resolver, cls_info):
+    """Report reads of traced pandas objects and their derived rows in source order."""
+    import libcst as cst
+    from libcst.metadata import MetadataWrapper, PositionProvider
+    from .usage import RESOLVED, _extract_self_chain, pandas_type_id
+
+    tables = set(getattr(resolver, 'pandas_results', {}))
+    refs = {name for name, ref in getattr(cls_info, 'refs', {}).items()
+            if getattr(ref, 'type_', None) is not None and pandas_type_id(ref.type_)}
+    if not tables and not refs:
+        return []
+
+    def receiver(expr, local):
+        if isinstance(expr, cst.Call) and not expr.args:
+            chain = _extract_self_chain(expr.func)
+            if isinstance(chain, list) and chain:
+                resolved, name = resolver.resolve_chain(cls_info.fqname, chain)
+                return resolved == RESOLVED and name in tables
+            return False
+        if isinstance(expr, cst.Attribute) and isinstance(expr.value, cst.Name):
+            return expr.value.value == 'self' and expr.attr.value in refs
+        return isinstance(expr, cst.Name) and expr.value in local
+
+    def derived(expr, local):
+        """A value read from a table receiver that is itself table-like (sub-table or row)."""
+        if receiver(expr, local):
+            return True
+        return (isinstance(expr, cst.Subscript) and isinstance(expr.value, cst.Attribute)
+                and expr.value.attr.value in ('loc', 'at') and receiver(expr.value.value, local))
+
+    class Locals(cst.CSTVisitor):
+        def __init__(self):
+            self.assigned = []      # (name, value)
+            self.rows = set()
+
+        def visit_Assign(self, node):
+            for target in node.targets:
+                if isinstance(target.target, cst.Name):
+                    self.assigned.append((target.target.value, node.value))
+
+        def visit_AnnAssign(self, node):
+            if isinstance(node.target, cst.Name) and node.value is not None:
+                self.assigned.append((node.target.value, node.value))
+
+        def _iterrows(self, target, iterable):
+            if (isinstance(iterable, cst.Call) and isinstance(iterable.func, cst.Attribute)
+                    and iterable.func.attr.value == 'iterrows' and isinstance(target, cst.Tuple)
+                    and len(target.elements) == 2 and isinstance(target.elements[1].value, cst.Name)):
+                self.assigned.append((target.elements[1].value.value, iterable.func.value))
+                self.rows.add(target.elements[1].value.value)
+
+        def visit_For(self, node):
+            self._iterrows(node.target, node.iter)
+
+        def visit_CompFor(self, node):
+            self._iterrows(node.target, node.iter)
+
+    found = Locals()
+    node.visit(found)
+    local, rows = set(), set()
+    changed = True
+    while changed:      # fixed point: locals assigned from other table locals
+        changed = False
+        for name, value in found.assigned:
+            if name not in local and derived(value, local):
+                local.add(name)
+                changed = True
+                if name in found.rows or not receiver(value, local - {name}):
+                    rows.add(name)      # .loc/.at result or iterrows row: may be a row
+
+    sites = []
+
+    bare = []      # receivers used as values, filtered once parents are known
+
+    class Sites(cst.CSTVisitor):
+        def visit_Attribute(self, expr):
+            if receiver(expr.value, local):
+                if expr.attr.value in TABLE_READ_ATTRS:
+                    sites.append((expr, expr.attr.value))
+                else:
+                    sites.append((expr, 'attribute'))
+            if receiver(expr, local):
+                bare.append(expr)
+
+        def visit_Subscript(self, expr):
+            if receiver(expr.value, local):
+                sites.append((expr, 'row' if isinstance(expr.value, cst.Name)
+                              and expr.value.value in rows else 'column'))
+
+        def visit_Call(self, expr):
+            if receiver(expr, local):
+                bare.append(expr)
+
+        def visit_Name(self, expr):
+            if receiver(expr, local):
+                bare.append(expr)
+
+    node.visit(Sites())
+    if not sites and not bare:
+        return []
+    module = cst.Module(body=[node])
+    wrapper = MetadataWrapper(module, unsafe_skip_copy=True)     # same node objects
+    positions = wrapper.resolve(PositionProvider)
+    first = positions[node.name].start.line
+    parents = {}
+
+    class Parents(cst.CSTVisitor):
+        def on_visit(self, child):
+            for grandchild in child.children:
+                parents[id(grandchild)] = child
+            return True
+
+    node.visit(Parents())
+    for expr in bare:
+        parent = parents.get(id(expr))
+        if isinstance(parent, (cst.Attribute, cst.Subscript)) and parent.value is expr:
+            continue        # a read already listed
+        if isinstance(parent, cst.Attribute) and parent.attr is expr:
+            continue        # an attribute name that happens to spell a local
+        if isinstance(parent, cst.AssignTarget) or (
+                isinstance(parent, (cst.Assign, cst.AnnAssign)) and getattr(parent, 'value', None) is expr
+                and _binds_local(parent, local)):
+            continue        # the local itself, or its binding: its uses are the sites
+        if isinstance(parent, cst.AnnAssign) and parent.target is expr:
+            continue
+        holder, up = expr, parent
+        while isinstance(up, (cst.Element, cst.Tuple, cst.List)):
+            holder, up = up, parents.get(id(up))
+        if isinstance(up, (cst.For, cst.CompFor)) and up.target is holder:
+            continue        # a loop target (the row of iterrows): its reads are the sites
+        sites.append((expr, 'use'))
+    if not sites:
+        return []
+    result = []
+    for expr, kind in sites:
+        shown = expr
+        for _ in range(2):      # T.loc[...]; T.index.max(); k in T.index stays T.index
+            parent = parents.get(id(shown))
+            if isinstance(parent, (cst.Subscript, cst.Call)) and (
+                    getattr(parent, 'value', None) is shown or getattr(parent, 'func', None) is shown):
+                shown = parent
+            elif isinstance(parent, cst.Attribute) and parent.value is shown:
+                shown = parent
+            else:
+                break
+        text = re.sub(r'\s*#[^\'"\n]*$', '', module.code_for_node(shown), flags=re.M)    # comments
+        text = ' '.join(text.replace('( ', '(').replace('[ ', '[').split()).replace('( ', '(').replace('[ ', '[')
+        result.append(TableReadSite(expr, kind, text, positions[expr].start.line - first + 1))
+    result.sort(key=lambda site: site.line)
+    return result

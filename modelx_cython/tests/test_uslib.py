@@ -96,7 +96,7 @@ def test_mx2cy_with_uslib(sample_dir, model):
             return self.visit(node.orelse) if self.exact_guard(node.test) else self.generic_visit(node)
         def visit_Call(self,node):
             # The virtual branch of that dispatch converts the public call to the Cell's C
-            # return type (``_mx_cy.cast(_mx_cy.double, ...)``); read the call itself.
+            # return type (``_mx_cy.cast(_mx_cy.double, ...)``, D59); read the call itself.
             if (isinstance(node.func,ast.Attribute) and node.func.attr=='cast'
                     and isinstance(node.func.value,ast.Name) and node.func.value.id=='_mx_cy'
                     and len(node.args)==2 and isinstance(node.args[0],ast.Attribute)
@@ -110,8 +110,8 @@ def test_mx2cy_with_uslib(sample_dir, model):
     assert has_power('1 + self.crediting_rate_ann(t)')
     assert has_power('1 + self.guar_rate_ann')
     assert has_power('1 - self.mort_rate(t)')
-    # Integer-exponent power keeps Cython's ordinary numeric operation.
-    assert "(1 + self.inflation_rate) ** (self.policy_year(t) - 1)" in src
+    # Integer-exponent power retains c8's ordinary Cython numeric operation.
+    assert "return (1 + self.inflation_rate) ** (self.policy_year(t) - 1)" in src
     # nothing is left for Cython to evaluate on double complex
     c_src = (translated / "_mx_classes.c").read_text(encoding="utf-8")
     assert "__Pyx_c_pow_double" not in c_src

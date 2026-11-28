@@ -349,6 +349,10 @@ class _c_Ordinary:
     assert {name for name, code in codes.items() if filt(code)} == {"_c_Ordinary.collect", "_c_Ordinary.total"}
 
 
+# --------------------------------------------------------------------
+# MxCallTraceLogger.log keeps only the traces that add something
+
+
 def test_logger_drops_traces_that_add_nothing():
     logger = MxCallTraceLogger(module="M")
     for i in [0, 1, 1, 0, 3, 2, 3]:
@@ -418,6 +422,21 @@ def test_logger_dedup_keeps_every_message(seq, caplog):
                 [r.message for r in caplog.records])
 
     assert derive(kept) == derive(traces)
+
+
+def test_cached_formula_retains_repeated_evaluations_for_cache_sizing(monkeypatch):
+    def _f_count(self, i):
+        return i
+
+    receiver = object()
+    logger = MxCallTraceLogger(module="M")
+    for _ in range(4):
+        trace = CallTrace(_f_count, {"self": receiver, "i": 1}, ret_val=1)
+        logger.log(trace)
+
+    monkeypatch.setattr(logger, "_get_params", lambda: None)     # no model module to walk here
+    logger.flush()
+    assert logger.cells_info[trace.funcname].max_evaluations_per_receiver == 4
 
 
 @pytest.mark.parametrize("seq", [
@@ -516,3 +535,23 @@ def test_cached_formula_traces_are_bounded_by_observations(monkeypatch):
                       "ret_type", "max_evaluations_per_receiver", "has_negative_args",
                       "array_buffer_compatible"):
         assert getattr(kept, attribute) == getattr(full, attribute), attribute
+
+
+def test_cache_sizing_counts_receivers_that_are_freed(monkeypatch):
+    """A receiver whose traces add nothing is held with its count: a later receiver cannot take
+    its id and merge the two counts."""
+    def _f_once(self, t):
+        return 1.0
+
+    class Receiver:
+        pass
+
+    logger = MxCallTraceLogger(module="M")
+    for _ in range(50):
+        trace = CallTrace(_f_once, {"self": Receiver(), "t": 0}, ret_val=1.0)
+        logger.log(trace)
+        name = trace.funcname
+        del trace
+    monkeypatch.setattr(logger, "_get_params", lambda: None)
+    logger.flush()
+    assert logger.cells_info[name].max_evaluations_per_receiver == 1

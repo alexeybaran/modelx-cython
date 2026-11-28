@@ -67,8 +67,17 @@ def lexical_nodes(body):
 def has_scope_effects(body):
     effects = (cst.Global, cst.Nonlocal, cst.Import, cst.ImportFrom, cst.ExceptHandler,
                cst.Del, cst.NamedExpr, cst.FunctionDef, cst.ClassDef, cst.Lambda)
-    return any(isinstance(node, effects) or isinstance(node, getattr(cst, 'Match', ()))
-               for node in lexical_nodes(body))
+    return any((isinstance(node, effects) and not _generated_binding(node))
+               or isinstance(node, getattr(cst, 'Match', ())) for node in lexical_nodes(body))
+
+
+def _generated_binding(node):
+    """A handler or a walrus the table pass generates, which rebinds no name of the formula: ``except E:`` with no
+    name (a hold that raises is left unresolved), and ``_mx_... := value`` (a key part evaluated once)."""
+    if isinstance(node, cst.ExceptHandler):
+        return node.name is None
+    return (isinstance(node, cst.NamedExpr) and isinstance(node.target, cst.Name)
+            and node.target.value.startswith('_mx_'))
 
 
 _SHARED = None     # while shared_facts() is open: {key of the nodes: (the nodes, CstFacts)}

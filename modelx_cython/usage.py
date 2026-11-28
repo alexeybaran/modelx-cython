@@ -29,6 +29,7 @@ to a cells poison every cells with a matching name.
 """
 
 from dataclasses import dataclass, field
+import sys
 import logging
 import numbers
 from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple, Union
@@ -118,7 +119,10 @@ class CellsResolver:
         self._scalar_refs = scalar_refs_by_class or {}
         self.locked_scalar_results = locked_scalar_results or {}
         self.unlocked_scalar_results = unlocked_scalar_results or {}
-        # cells with a cached formula; cell_rettype() reads the final C return type.
+        # cells fqname -> 'pandas.DataFrame' / 'pandas.Series': zero-argument cells whose every
+        # sampled result is that pandas class; reads through them are reported, never lowered.
+        self.pandas_results = {}
+        self.frame_schemas = {}          # T-3: zero-argument cells fqname -> tracer.frame_schema
         self.cached_cells = set()
         self._cell_infos = {}
         self._name_index: Dict[str, List[str]] = {}
@@ -127,7 +131,8 @@ class CellsResolver:
                 self._name_index.setdefault(name, []).append(fqname)
 
     def cell_rettype(self, fqname: str) -> Optional[str]:
-        """C return type of a typed, non-special cell, read when asked; None otherwise."""
+        """C return type of a typed, non-special cell, read when asked (it depends on
+        provider admission, which runs after the resolver is built); None otherwise."""
         cells = self._cell_infos.get(fqname)
         if cells is None or cells.is_special() or not cells.has_typeinfo():
             return None
@@ -527,6 +532,28 @@ def collect_candidates(module_infos) -> Tuple[Dict[str, int], Set[str]]:
     return candidates, array_returning
 
 
+def pandas_type_id(tp):
+    """'pandas.DataFrame', 'pandas.Series' or 'pandas.Index' when ``tp`` is (a subclass of) one,
+    else None. issubclass against pandas' public classes, looked up only when pandas is already loaded (a
+    traced pandas type means it is), so pandas is never imported here."""
+    pd = sys.modules.get('pandas')
+    if pd is None or not isinstance(tp, type):
+        return None
+    for name in ('DataFrame', 'Series', 'Index'):
+        if issubclass(tp, getattr(pd, name)):
+            return 'pandas.' + name
+    return None
+
+
+def _pandas_result(cells):
+    """The pandas class of a zero-argument formula cell whose traced results are all of it."""
+    rt = getattr(cells, '_rt', None)
+    if (not rt or not getattr(cells, 'has_formula_def', False) or cells.has_args()
+            or getattr(rt, 'ret_type', None) is None):
+        return None
+    return pandas_type_id(rt.ret_type.value_type)
+
+
 def build_resolver(module_infos) -> CellsResolver:
     """Build a :class:`CellsResolver` over ``{fqname: ModuleInfo}``.
 
@@ -545,6 +572,8 @@ def build_resolver(module_infos) -> CellsResolver:
     locked_scalar_results: Dict[str, str] = {}
     unlocked_scalar_results: Dict[str, str] = {}
     cached_cells, cell_infos = set(), {}
+    pandas_results = {}
+    frame_schemas = {}
 
     for fqname, info in module_infos.items():
         pkg, basename = fqname.rsplit(".", 1)
@@ -553,6 +582,12 @@ def build_resolver(module_infos) -> CellsResolver:
                 name: cells.fqname for name, cells in cls_info.cells.items()
             }
             for cells in cls_info.cells.values():
+                pandas_result = _pandas_result(cells)
+                if pandas_result is not None:
+                    pandas_results[cells.fqname] = pandas_result
+                    frame = getattr(getattr(cells, '_rt', None), 'frame_schema', None)
+                    if frame is not None:
+                        frame_schemas[cells.fqname] = frame
                 if cells.has_formula_def:
                     cached_cells.add(cells.fqname)
                     cell_infos[cells.fqname] = cells
@@ -580,6 +615,8 @@ def build_resolver(module_infos) -> CellsResolver:
             }
     resolver = CellsResolver(cells_by_class, refs_by_class, spaces_by_class,
                              scalar_refs_by_class, locked_scalar_results, unlocked_scalar_results)
+    resolver.pandas_results = pandas_results
+    resolver.frame_schemas = frame_schemas
     resolver.cached_cells = cached_cells
     resolver._cell_infos = cell_infos
     return resolver

@@ -4,14 +4,14 @@ A formula of an item class that subscripts a call of a zero-argument cached Cell
 memoryview, ``self.data.mort_table_array()[a]`` or ``self.rates()[t]``, would copy the owner's cached slice on
 every evaluation: an atomic increment and decrement of the one acquisition count that every worker shares
 (Term_US_SEC at four workers was slower than at one). The read becomes an element read of a field of the item
-that holds the slice: the first read in the item's lifetime calls the Cell (its own first-fill discipline)
-and stores the slice in the field, once; later reads index the field, which acquires nothing.
+that holds the slice: the first read in the item's lifetime calls the Cell (its own first-fill discipline,
+mv-race) and stores the slice in the field, once; later reads index the field, which acquires nothing.
 
 Rule (recognised by traced type, never by spelling): the receiver is ``self`` or a Reference of ``self`` typed as
 a compiled Space of this module; the Cell is cached, takes no arguments, and its traced result is a typed
 memoryview; the formula has parameters (it runs many times per item); the reading class has items (its instances are items, used by one thread at a time, as their own
-caches are). An item that holds an array keeps the slice it took for its lifetime (see holds.py), and the slice
-keeps its buffer alive.
+caches are). The generated Collect reset clears the slice and its readiness with the other per-policy fields.
+The first read of the next policy obtains the current input. The held slice keeps its buffer alive.
 """
 import libcst as cst
 
@@ -119,7 +119,6 @@ def lower(node, cls_info, cells, functions):
     through held fields; ``functions`` collects the module-level hold functions. Only a formula with parameters is
     lowered: it runs many times per item, while a zero-argument Cell runs once per item, where holding costs more
     than the one slice copy it saves."""
-    if (cls_info.name not in cls_info.visitor.itemspace_classes
-            or not cells.has_args()):
+    if cls_info.name not in cls_info.visitor.itemspace_classes or not cells.has_args():
         return node
     return node.visit(_HoldArrays(cls_info, functions))

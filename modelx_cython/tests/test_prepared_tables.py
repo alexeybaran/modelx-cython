@@ -1,0 +1,429 @@
+"""PreparedTable (runtime/_tables.pyx) answers keyed reads exactly as pandas does (T-2).
+
+Random keys, misses included, on every index kind the preparation accepts: dense and sparse int, text,
+IntEnum, float, unsorted, two and three levels, a Series. Each read is compared with ``.loc[key, col]`` in value
+and type, a miss with pandas' KeyError; ``in index`` likewise. A typed probe module
+exercises the C-level reads compiled code uses (code_ll, code_obj, row_key, row_codes, prefix_range, f64_at,
+i64_at, object_at), and gives the tests ``value``, ``row``, ``contains`` and ``key_codes`` through them.
+"""
+import enum
+import zlib
+import shutil
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
+RUNTIME = Path(__file__).resolve().parents[1] / 'runtime'
+
+PROBE = textwrap.dedent('''\
+    # cython: freethreading_compatible=True
+    import numpy as np
+    from _tables cimport PreparedRef, PreparedTable, bind_own, slot
+
+    def flat_f64(PreparedTable table, long long key, Py_ssize_t slot):
+        cdef Py_ssize_t row = table.code_ll(0, key) if table.nlevels == 1 else -1
+        if row < 0:
+            raise KeyError(key)
+        return table.f64_at(row, slot)
+
+    def codes_row(PreparedTable table, codes):
+        cdef Py_ssize_t[8] buffer
+        for i, c in enumerate(codes):
+            buffer[i] = c
+        return table.row_codes(buffer, len(codes))
+
+    def prefix_count(PreparedTable table, codes):
+        cdef Py_ssize_t[8] buffer
+        cdef Py_ssize_t start = 0, stop = 0
+        for i, c in enumerate(codes):
+            buffer[i] = c
+        if not table.prefix_range(buffer, len(codes), &start, &stop):
+            return 0
+        return stop - start
+
+    def i64_value(PreparedTable table, key, Py_ssize_t slot):
+        cdef Py_ssize_t row = table.row_key(key)
+        if row < 0:
+            raise KeyError(key)
+        return table.i64_at(row, slot)
+
+    def row_dtype(PreparedTable table):
+        return table.row_object, table.row_float
+
+    def own_slot(frame, int signature):
+        cdef PreparedTable table = bind_own(frame)
+        assert table is not None
+        return slot(<PreparedRef>table, signature)
+
+    # Python access for the tests, through the lookups compiled code uses
+    def key_codes(PreparedTable table, key):
+        parts = key if table.nlevels > 1 else (key,)
+        if not isinstance(parts, tuple) or len(parts) != table.nlevels:
+            return None
+        codes = [table.code_obj(level, part) for level, part in enumerate(parts)]
+        return None if min(codes) < 0 else codes
+
+    def row(PreparedTable table, key):
+        return table.row_key(key)
+
+    def contains(PreparedTable table, key):
+        return table.row_key(key) >= 0
+
+    def value(PreparedTable table, key, column=None):
+        cdef Py_ssize_t row = table.row_key(key)
+        if row < 0:
+            raise KeyError(key)
+        position = table.column_positions.get(None if table.is_series else column)
+        if position is None:
+            raise KeyError(column)
+        kind, slot = table.column_kind[position], table.column_slot[position]
+        if kind == 0:
+            return np.float64(table.f64_at(row, slot))
+        if kind == 1:
+            return np.int64(table.i64_at(row, slot))
+        return table.object_at(row, slot)
+''')
+
+
+@pytest.fixture(scope='module')
+def tables(tmp_path_factory):
+    folder = tmp_path_factory.mktemp('prepared')
+    shutil.copy(RUNTIME / '_tables.pyx', folder / '_tables.pyx')
+    shutil.copy(RUNTIME / '_tables.pxd', folder / '_tables.pxd')
+    (folder / 'tables_probe.pyx').write_text(PROBE, encoding='utf-8')
+    (folder / 'setup.py').write_text(
+        'from setuptools import setup\nfrom Cython.Build import cythonize\n'
+        'setup(ext_modules=cythonize(["_tables.pyx", "tables_probe.pyx"], '
+        'compiler_directives={"freethreading_compatible": True, "language_level": 3}))\n', encoding='utf-8')
+    subprocess.run([sys.executable, 'setup.py', 'build_ext', '--inplace'], cwd=folder, check=True,
+                   stdout=subprocess.DEVNULL)
+    sys.path.insert(0, str(folder))
+    try:
+        import _tables
+        import tables_probe
+        yield _tables, tables_probe
+    finally:
+        sys.path.remove(str(folder))
+
+
+# read signatures of a model, as the build writes them: (levels, columns of a row read by field, label, kind)
+SIGNATURES = (
+    ('i', (('q', 0), ('n', 2)), 'n', 2),            # field n (kept as an object) of a row of a float64 and another column
+    ('i', (('q', 0), ('n', 2)), 'q', 0),
+    ('i', None, 'q', 0),                            # a scalar read of q
+)
+
+
+@pytest.fixture(scope='module')
+def model_tables(tmp_path_factory):
+    """The runtime as a compiled model holds it: in the model's package, beside its read signatures."""
+    folder = tmp_path_factory.mktemp('model')
+    package = folder / 'sigmodel'
+    package.mkdir()
+    (package / '__init__.py').write_text('', encoding='utf-8')
+    shutil.copy(RUNTIME / '_tables.pyx', package / '_tables.pyx')
+    shutil.copy(RUNTIME / '_tables.pxd', package / '_tables.pxd')
+    (package / '_mx_table_signatures.py').write_text(f'SIGNATURES = {SIGNATURES!r}\n', encoding='utf-8')
+    (folder / 'setup.py').write_text(
+        'from setuptools import setup\nfrom Cython.Build import cythonize\n'
+        'setup(ext_modules=cythonize(["sigmodel/_tables.pyx"], '
+        'compiler_directives={"freethreading_compatible": True, "language_level": 3}))\n', encoding='utf-8')
+    subprocess.run([sys.executable, 'setup.py', 'build_ext', '--inplace'], cwd=folder, check=True,
+                   stdout=subprocess.DEVNULL)
+    sys.path.insert(0, str(folder))
+    try:
+        from sigmodel import _tables
+        yield _tables
+    finally:
+        sys.path.remove(str(folder))
+
+
+class Plan(enum.IntEnum):
+    BASIC = 1
+    PLUS = 2
+    MAX = 5
+
+
+def frames():
+    rng = np.random.default_rng(7)
+    n = 40
+    values = dict(q=rng.random(n), k=rng.integers(-5, 5, n).astype(np.int64),
+                  s=[f'v{i}' for i in range(n)], b=rng.random(n) > 0.5)
+    yield 'dense int', pd.DataFrame(values, index=pd.Index(range(20, 20 + n), name='age'))
+    yield 'sparse int', pd.DataFrame(values, index=pd.Index(rng.permutation(np.arange(0, 3 * n, 3)), name='k'))
+    yield 'text', pd.DataFrame(values, index=pd.Index([f'key{i}' for i in rng.permutation(n)]))
+    yield 'float', pd.DataFrame(values, index=pd.Index(np.arange(n) * 0.5))
+    yield 'two levels', pd.DataFrame(values, index=pd.MultiIndex.from_product([['F', 'M'], range(20)]))
+    yield 'three levels enum', pd.DataFrame(
+        {'q': rng.random(3 * 2 * 4), 'k': np.arange(24, dtype=np.int64)},
+        index=pd.MultiIndex.from_product([list(Plan), [1, 2], [30, 31, 35, 40]]))
+    yield 'unsorted two levels', pd.DataFrame(values, index=pd.MultiIndex.from_tuples(
+        [(('C', 'A', 'B')[i % 3], int(x)) for i, x in enumerate(rng.permutation(n))]))
+
+
+def keys_of(frame, rng):
+    present = list(frame.index)
+    if frame.index.nlevels == 1:
+        label = present[0]
+        if isinstance(label, str):
+            absent = ['nokey', 'key999']
+        elif isinstance(label, float):
+            absent = [-1.0, 1e9, 0.25]
+        else:
+            absent = [-999, 10 ** 6, int(present[0]) + 10 ** 5]
+    else:
+        absent = [tuple('Z' if isinstance(p, str) else 999 for p in present[0])]
+    return [present[int(i)] for i in rng.integers(0, len(present), 60)] + absent
+
+
+def outcome(function):
+    try:
+        return 'ok', function()
+    except KeyError as error:
+        return 'KeyError', error.args
+    except Exception as error:
+        return type(error).__name__, str(error)
+
+
+@pytest.mark.parametrize('name,frame', list(frames()), ids=[n for n, _ in frames()])
+def test_value_equals_loc(tables, name, frame):
+    _tables, probe = tables
+    table = _tables.prepare(frame)
+    assert table is not None, _tables.unprepared_reason(frame)
+    assert table.source is frame
+    rng = np.random.default_rng(zlib.crc32(name.encode()))
+    for key in keys_of(frame, rng):
+        for column in frame.columns:
+            want, got = outcome(lambda: frame.loc[key, column]), outcome(lambda: probe.value(table, key, column))
+            assert want[0] == got[0], (name, key, column, want, got)
+            if want[0] == 'ok':
+                assert type(want[1]) is type(got[1]) and want[1] == got[1], (name, key, column, want, got)
+        assert (key in frame.index) == probe.contains(table, key), (name, key)
+
+
+def test_series(tables):
+    _tables, probe = tables
+    series = pd.Series(np.arange(5) * 0.1, index=pd.Index([3, 1, 4, 9, 5]), name='q')
+    table = _tables.prepare(series)
+    for key in [1, 3, 9, 2, 100]:
+        want, got = outcome(lambda: series.loc[key]), outcome(lambda: probe.value(table, key))
+        assert want[0] == got[0] and (want[0] != 'ok' or (type(want[1]) is type(got[1]) and want[1] == got[1]))
+
+
+def test_typed_reads(tables):
+    _tables, probe = tables
+    frame = pd.DataFrame({'q': np.arange(30) * 0.25, 'k': np.arange(30, dtype=np.int64) * 3},
+                         index=pd.Index(np.arange(30) * 2 + 7))
+    table = _tables.prepare(frame)
+    for key in list(frame.index) + [8, -1, 10 ** 9]:
+        want = outcome(lambda: float(frame.loc[key, 'q']))
+        got = outcome(lambda: probe.flat_f64(table, key, 0))
+        assert want == got, (key, want, got)
+        want = outcome(lambda: int(frame.loc[key, 'k']))
+        assert want == outcome(lambda: probe.i64_value(table, key, 0)), key
+    multi = pd.DataFrame({'r': np.arange(8) * 1.0},
+                         index=pd.MultiIndex.from_product([['A', 'B'], [1, 2, 3, 4]]))
+    table = _tables.prepare(multi)
+    a = table.level_labels[0].index("A")
+    assert probe.prefix_count(table, [a]) == len(multi.loc['A'])
+    for key in multi.index:
+        assert probe.codes_row(table, probe.key_codes(table, key)) >= 0
+    assert probe.codes_row(table, [a, 9]) == -1
+
+
+def test_extremes(tables):
+    _tables, probe = tables
+    for frame in (pd.DataFrame({'q': [1.0, 2.0]}, index=pd.Index([3, 9])),
+                  pd.DataFrame({'q': [1.0, 2.0, 3.0]}, index=pd.MultiIndex.from_tuples([('A', 1), ('B', 2), ('B', 5)]))):
+        table = _tables.prepare(frame)
+        assert type(table.max_label) is type(frame.index.max()) and table.max_label == frame.index.max()
+        assert type(table.min_label) is type(frame.index.min()) and table.min_label == frame.index.min()
+
+
+@pytest.mark.parametrize('frame,reason', [
+    (pd.DataFrame({'q': [1.0, 2.0]}, index=pd.Index([1, 1])), 'not unique'),
+    (pd.DataFrame({'q': [1.0, 2.0]}, index=pd.Index([1.0, np.nan])), 'NaN'),
+    (pd.DataFrame([[1.0, 2.0]], columns=['q', 'q']), 'duplicate column'),
+    (pd.DataFrame({'q': [1.0, 2.0]}, index=pd.MultiIndex.from_tuples([('A', 1), ('A', 1)])), 'not unique'),
+])
+def test_left_to_pandas(tables, frame, reason):
+    _tables, probe = tables
+    assert _tables.prepare(frame) is None
+    assert reason in _tables.unprepared_reason(frame)
+
+
+def test_failed_own_binding_leaves_read_to_pandas(tables):
+    _, probe = tables
+    assert probe.own_slot(None, 0) == -1
+
+
+def own_rule_frames():
+    """Indexes whose labels pandas finds by rules of its own (a text for a date, a number inside an interval), or
+    whose labels it cannot order: a read of them is pandas' (the table is not prepared), never a wrong answer or an
+    error of the preparation."""
+    import datetime
+    q = {'q': [1.0, 2.0]}
+    yield 'datetime', pd.DataFrame(q, index=pd.to_datetime(['2020-01-01', '2021-01-01'])), [
+        '2020-01-01', '2021-01-01', '2019-01-01', datetime.datetime(2020, 1, 1), pd.Timestamp('2021-01-01')]
+    yield 'interval', pd.DataFrame(q, index=pd.IntervalIndex.from_breaks([0, 10, 20])), [5, 10, 15, 25, pd.Interval(0, 10)]
+    yield 'period', pd.DataFrame(q, index=pd.period_range('2020-01', periods=2, freq='M')), [
+        '2020-01', '2020-02', '2020-03', pd.Period('2020-02', 'M')]
+    yield 'timedelta', pd.DataFrame(q, index=pd.to_timedelta(['1D', '2D'])), ['1D', '2D', '3D', pd.Timedelta('1D')]
+    yield 'categorical', pd.DataFrame(q, index=pd.CategoricalIndex(['a', 'b'])), ['a', 'b', 'c']
+    yield 'mixed types', pd.DataFrame({'q': [1.0, 2.0, 3.0]}, index=pd.Index([1, 'a', 2.5], dtype=object)), [1, 'a', 2.5, 'b']
+    yield 'beyond 64 bits', pd.DataFrame(q, index=pd.Index([1, 2 ** 63 + 5], dtype='uint64')), [1, 2 ** 63 + 5, 7]
+    yield 'bool', pd.DataFrame(q, index=pd.Index([True, False])), [True, False, 1, 0, 1.0]
+    yield 'date level', pd.DataFrame(q, index=pd.MultiIndex.from_arrays(
+        [['a', 'b'], pd.to_datetime(['2020-01-01', '2021-01-01'])])), [('a', '2020-01-01'), ('b', '2021-01-01'), ('a', '2021-01-01')]
+
+
+@pytest.mark.parametrize('name,frame,keys', list(own_rule_frames()), ids=[n for n, _, _ in own_rule_frames()])
+def test_index_pandas_looks_up_by_its_own_rules(tables, name, frame, keys):
+    _tables, probe = tables
+    table = _tables.prepare(frame)          # must not raise: a frame Cell binds its frame when it is computed
+    if table is None:
+        assert _tables.unprepared_reason(frame)
+        return
+    for key in keys:
+        want, got = outcome(lambda: frame.loc[key, 'q']), outcome(lambda: probe.value(table, key, 'q'))
+        assert want[0] == got[0] and (want[0] != 'ok' or want[1] == got[1]), (name, key, want, got)
+        assert (key in frame.index) == probe.contains(table, key), (name, key)
+
+
+def test_bool_and_huge_keys(tables):
+    """A bool is no label of a number level although it equals 1 or 0 (pandas raises KeyError; the dict of the level
+    would find 1.0), and an integer beyond 64 bits is absent from an int level (KeyError, not OverflowError)."""
+    _tables, probe = tables
+    floats = pd.DataFrame({'q': [1.0, 2.0, 3.0]}, index=pd.Index([0.0, 1.0, 2.5]))
+    two = pd.DataFrame({'q': [1.0, 2.0]}, index=pd.MultiIndex.from_tuples([('a', 1.0), ('b', 0.0)]))
+    ints = pd.DataFrame({'q': [1.0, 2.0]}, index=pd.Index([1, 2]))
+    cases = [(floats, [True, False, np.True_, np.False_, 1, 0, 1.0, 2.5]),
+             (two, [('a', True), ('b', False), ('a', 1), ('a', 1.0), ('b', 0)]),
+             (ints, [2 ** 70, -2 ** 70, True, np.True_, 1, 2.0])]
+    for frame, keys in cases:
+        table = _tables.prepare(frame)
+        assert table is not None
+        for key in keys:
+            want, got = outcome(lambda: frame.loc[key, 'q']), outcome(lambda: probe.value(table, key, 'q'))
+            assert want[0] == got[0] and (want[0] != 'ok' or want[1] == got[1]), (key, want, got)
+            assert (key in frame.index) == probe.contains(table, key), key
+
+
+@pytest.mark.parametrize('dtype,native', [('int32', 1), ('float32', 1), ('uint8', 1), ('uint64', 1), (object, 3)])
+def test_row_of_a_narrow_number_column_is_pandas(model_tables, dtype, native):
+    """A row read by field is compiled for the kinds of every column, a column that is not float64 or int64 as an
+    object kept as stored. pandas widens a row of number columns to one dtype (int32 beside float64: float64), so
+    the stored numpy.int32 is not the value of the row's field: such a row is read on pandas. A row with a real
+    object column keeps every value as stored and is read natively."""
+    values = ['x', 'y', 'z'] if dtype is object else np.array([1, 2, 250]).astype(dtype)
+    frame = pd.DataFrame({'q': [0.5, 1.5, 2.5], 'n': values}, index=pd.Index([10, 11, 12]))
+    row = frame.loc[12]
+    assert (row.dtype == object) == (dtype is object)
+    if dtype is not object:
+        assert type(row['n']) is not type(frame['n'].iat[2])        # widened: not the stored value
+    # the two row signatures are native only for the object row; the scalar read of q always is
+    assert model_tables.native_slots(frame) == native
+
+
+ROW_DTYPES = [
+    {'q': 'float64', 'n': 'int32'}, {'q': 'float64', 'n': 'int64'}, {'q': 'float32', 'n': 'int64'},
+    {'q': 'int64', 'n': 'uint64'}, {'q': 'int8', 'n': 'uint8'}, {'q': 'float64', 'b': 'bool'}, {'q': 'int64', 'b': 'bool'},
+    {'a': 'bool', 'b': 'bool'}, {'q': 'float64', 'c': 'complex128'}, {'q': 'float64', 'o': 'object'},
+    {'q': 'float64', 'd': 'datetime64[ns]'}, {'q': 'float64', 'e': 'Int64'}, {'q': 'float64', 'k': 'category'},
+    {'q': 'float64', 'n': 'int64', 'b': 'bool'}, {'n': 'int64'}, {'q': 'float64'}, {'q': 'float32', 'r': 'float32'},
+    {'q': 'float64', 's': 'str'}, {'s': 'str', 't': 'str'}, {'s': 'str'}, {'n': 'int64', 's': 'str', 'b': 'bool'},
+    {'q': 'float64', 's': 'string'}, {'s': 'string', 't': 'str'},
+]
+
+
+@pytest.mark.parametrize('dtypes', ROW_DTYPES, ids=lambda d: '-'.join(d.values()))
+def test_row_dtype_is_the_one_pandas_gives(tables, dtypes):
+    """Whether a row is widened to a number dtype (and to float64) is decided from the column dtypes, as pandas
+    decides it for ``frame.iloc[0]``: bool beside a number gives object, numbers give their common type."""
+    _tables, probe = tables
+    columns = {name: pd.Series(['x', 'y', 'z'], dtype=dtype) if dtype in ('str', 'string')
+               else pd.Series([1, 0, 1], dtype=dtype) if dtype in ('bool', 'Int64', 'category')
+               else pd.Series(np.array([1, 0, 1]).astype(dtype)) for name, dtype in dtypes.items()}
+    frame = pd.DataFrame(columns).set_axis(pd.Index([10, 11, 12]))
+    table = _tables.prepare(frame)
+    assert table is not None
+    kind = getattr(frame.iloc[0].dtype, 'kind', 'O')
+    assert probe.row_dtype(table) == (kind not in 'iufc', kind == 'f'), (frame.dtypes.to_dict(), frame.iloc[0].dtype)
+
+
+def test_object_columns_hold_what_pandas_returns(tables):
+    """Every value of a column kept as objects is the value ``.loc`` returns, in type too: text of both pandas
+    text dtypes (a missing one included), Python objects, and columns of other dtypes."""
+    _tables, probe = tables
+    frame = pd.DataFrame({
+        'text': pd.Series(['a', None, 'c', 'd'], dtype='str'),
+        'objects': pd.Series(['a', 3, None, (1, 2)], dtype=object),
+        'small': np.array([1, 2, 3, 4], dtype=np.int32),
+        'flag': [True, False, True, False],
+        'when': pd.to_datetime(['2020-01-01', '2020-01-02', '2020-01-03', '2020-01-04']),
+        'q': [0.5, 1.5, 2.5, 3.5]}).set_axis(pd.Index([4, 2, 3, 1]))
+    table = _tables.prepare(frame)
+    for key in frame.index:
+        for column in frame.columns:
+            want, got = frame.loc[key, column], probe.value(table, key, column)
+            assert type(want) is type(got) and (want == got or (want != want and got != got)), (key, column, want, got)
+
+
+def test_copy_at_bind(tables):
+    _tables, probe = tables
+    frame = pd.DataFrame({'q': [1.0, 2.0, 3.0]}, index=pd.Index([10, 11, 12]))
+    table = _tables.prepare(frame)
+    frame.loc[11, 'q'] = 99.0                   # an in-place edit after binding: the prepared copy is unchanged
+    assert probe.value(table, 11, 'q') == 2.0 and table.source is frame
+
+
+def test_frame_bound_again_is_prepared_again(tables):
+    """A frame Cell prepares its frame every time it binds it: a frame edited in place and then given to a new
+    model is read as it is then, not from the copy an earlier model prepared for the same object."""
+    _tables, probe = tables
+    from modelx_cython.runtime import table_cells
+    bind = table_cells._binders[_tables.__name__]       # what a frame Cell calls when it stores its value
+    frame = pd.DataFrame({'q': [1.0, 2.0, 3.0], 'k': np.arange(3, dtype=np.int64)}, index=pd.Index([10, 11, 12]))
+    first = bind(frame)
+    assert probe.value(first, 11, 'q') == 2.0
+    frame.loc[11, 'q'] = 99.0
+    second = bind(frame)                    # the frame Cell of the new model
+    assert second is not first and probe.value(second, 11, 'q') == 99.0
+    assert probe.value(first, 11, 'q') == 2.0      # what the first model's items hold is not changed under them
+    _tables.check_unchanged(frame)          # a read that looks the frame up finds the table bound last
+
+
+@pytest.mark.parametrize('name,frame', list(frames()), ids=[n for n, _ in frames()])
+def test_hundred_thousand_reads(tables, name, frame):
+    """10^5 random keys per index kind (about 10% absent), one float and one int column: 0 differences."""
+    _tables, probe = tables
+    table = _tables.prepare(frame)
+    rng = np.random.default_rng(zlib.crc32(name.encode()) + 1)
+    present = list(frame.index)
+    absent = keys_of(frame, rng)[-1]
+    expected = {key: (float(frame.loc[key, 'q']), int(frame.loc[key, 'k'])) for key in present}
+    picks = rng.integers(0, len(present) + max(1, len(present) // 9), 100_000)
+    for pick in picks:
+        key = present[pick] if pick < len(present) else absent
+        want = expected.get(key)
+        row = probe.row(table, key)
+        if want is None:
+            assert row < 0, (name, key)
+            continue
+        assert (probe.value(table, key, 'q'), probe.value(table, key, 'k')) == want, (name, key)
+
+
+def test_check_mode_detects_an_edit(tables):
+    """T-4 verify_inputs: a frame edited in place after it was bound is detected; an unchanged one passes."""
+    _tables, probe = tables
+    frame = pd.DataFrame({'q': [1.0, 2.0, 3.0], 'k': np.arange(3, dtype=np.int64)}, index=pd.Index([10, 11, 12]))
+    _tables.check_unchanged(frame)          # binds it, then checks: unchanged
+    _tables.check_unchanged(frame)
+    frame.loc[11, 'q'] = 9.0
+    with pytest.raises(RuntimeError, match='edited in place'):
+        _tables.check_unchanged(frame)

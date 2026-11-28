@@ -41,8 +41,16 @@ def _unbound_locals(node):
     facts = CstFacts(body)
     parameters = {param.name.value for param in (*node.params.posonly_params, *node.params.params,
                                                  *node.params.kwonly_params)}
+    # a local whose address is taken (``_mx_cy.address(state)``, the state of a lowered reduction) is a C
+    # variable by construction: it stays one
+    addressed = {part.args[0].value.value for part in lexical_nodes(body)
+                 if isinstance(part, cst.Call) and isinstance(part.func, cst.Attribute)
+                 and isinstance(part.func.value, cst.Name) and part.func.value.value == CY_MOD
+                 and part.func.attr.value == 'address' and len(part.args) == 1
+                 and isinstance(part.args[0].value, cst.Name)}
     names = sorted(name for name, count in facts.stores.items()
-                   if count and name not in parameters and maybe_unbound(body, name, facts))
+                   if count and name not in parameters and name not in addressed
+                   and maybe_unbound(body, name, facts))
     if not names:
         return node
     declared = {}

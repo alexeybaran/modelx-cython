@@ -93,6 +93,10 @@ array would exceed the dense storage ceiling (`max_dense_entries`) uses the
 hash store instead, and the admission report says so. The report lists, per
 Cell, the axes whose size is declared and where.
 
+An argument whose every sampled value is a member of one `IntEnum` class
+takes the whole member range of that class as its domain, so a member the
+sample did not use is accepted, as it is by the Python model.
+
 If the sample run passes an argument value equal to or larger than the
 declared size, the size is automatically raised to the observed maximum
 plus one, and the adjustment is logged at `INFO` level.  For parameter
