@@ -67,6 +67,21 @@ All 26 optimized builds succeeded. All 260 timing runs and 52 instruction runs p
 | WholeLife_US_SEC | Upstream | 1,102.6 [1,082.9–1,121.3] | 368.6 [357.2–374.5] | 6,319,282 | 691.3 [691.3–691.4] | 26.5 + 80.1 |
 | WholeLife_US_SEC | Fast SEC | 173.1 [169.7–186.5] | 89.3 [87.4–102.3] | 1,749,570 | 103.8 [103.7–103.9] | 39.5 + 80.6 |
 
+## Effect of the 512-projection batches on worker scaling
+
+The timing driver divides each batch of up to 512 policy projections into tasks of up to 64. It waits for every task in the batch to finish before running generation-zero garbage collection and submitting the next batch. The 34,300-policy MYGA book has 67 batches. The common cleanup schedule bounds memory for the upstream builds. Earlier upstream four-worker runs without this cleanup reached about 15 GiB in the 16 GiB WSL guest.
+
+The diagnostic below reused the Fast SEC binaries and ordered books from the paired comparison. It held task size fixed and varied the placement of the waits and explicit garbage collection. Automatic garbage collection was disabled during each diagnostic interval. The whole-book driver queued all tasks and collected once at the end. Each median comes from three fresh processes with alternate run order, on the same WSL2 machine, with one or four distinct physical cores pinned, the GIL verified off, and every value checked against live modelx.
+
+| Model | Projections | Batched with cleanup, 1w s | Batched with cleanup, 4w s | Batched with end-only cleanup, 4w s | Whole book, 1w s | Whole book, 4w s | Batched scaling | Whole-book scaling |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| DIA | 12,000 | 4.286 | 3.618 | 3.266 | 4.085 | 2.923 | 1.18× | 1.40× |
+| FIA | 10,900 | 2.803 | 2.307 | 2.242 | 2.708 | 1.537 | 1.21× | 1.76× |
+| MYGA | 34,300 | 8.092 | 5.657 | 5.050 | 7.738 | 2.856 | 1.43× | 2.71× |
+| RILA | 27,000 | 8.595 | 5.899 | 5.540 | 8.385 | 4.544 | 1.46× | 1.85× |
+
+Removing the waits between batches improved four-worker time on all four models with the same end-only cleanup. For MYGA the waits accounted for 2.194 s of the 2.801 s recovered. Median process CPU time fell from 15.311 s to 11.076 s at that step. DIA still scaled only 1.40×, and FIA and RILA were below 2.5× in this matched diagnostic. The earlier driver collected explicitly every 64 projections at one worker and imposed no explicit cleanup at four workers. Its scaling figures therefore included the effect of different cleanup schedules. The matched upstream table above uses common batching for both compilers. The whole-book test was run on Fast SEC only.
+
 ## Impact on the earlier generic measurements
 
 The table below isolates the build-setting correction by using the same earlier one-worker cleanup schedule before and after the change. Upstream retired instructions dropped on every available earlier pair. SPIA changed most at 31.8%. The Fast SEC instruction differences were at most 0.1% except RILA, which fell 5.1%. WholeLife's elapsed change across those sessions was much larger than its instruction change. The fresh matched pair above is the basis for the current WholeLife speed ratio.
