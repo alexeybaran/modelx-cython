@@ -133,6 +133,15 @@ settings described under {ref}`cache-settings`.
       "arr_whole": {"return_type": "memoryview"}}}
 ```
 
+### `collect_workers`
+
+Model level only. The number of worker threads that the compiled `collect()` of a Space declared with
+modelx's `Space.set_collect` uses by default: a positive integer, `1` if absent. See {ref}`collect`.
+
+```python
+{"collect_workers": 4}
+```
+
 (deprecated-keys)=
 ## Deprecated keys
 

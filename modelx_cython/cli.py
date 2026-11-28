@@ -379,6 +379,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 resolver=resolver,
                 cells_kinds=cells_kinds,
                 ref_kinds=ref_kinds,
+                collect_modules=module_infos,
             )
             pxd = PXDGenerator(u.module_info)
 

@@ -71,6 +71,7 @@ from modelx_cython.cell_entries import CacheHit, DenseEntry, dense_condition
 from modelx_cython import numeric_cache
 from modelx_cython import holds
 from modelx_cython import value_storage
+from modelx_cython import collect
 
 from modelx_cython.consts import (
     FORMULA_PREF,
@@ -245,6 +246,11 @@ class PXDGenerator:
             public_meth_defs=textwrap.indent(self.public_meth_defs(name), ' ' * 4)
         )
         value_storage.check_last(block, self.module.classes[name])
+        if collect.reuses_items(self.module.visitor, name):
+            cls = self.module.classes[name]
+            values = {line.strip() for line in value_storage.pxd_declarations(cls)}
+            retained_caches = {f'_v_{cell.name}' for cell in cls.cells.values() if collect.retains_numeric_cache(cell)}
+            block += '\n\n' + collect.reset_function(name, block, self.module.classes, values, retained_caches)
         return block
 
     @cached_property
@@ -288,6 +294,9 @@ class PXDGenerator:
         decl_stmts = []
         if cls_name in self.module.visitor.dynamic_ref_classes:
             decl_stmts.append("cdef dict __dict__\n")
+        if cls_name in self.module.visitor.collect_spaces:
+            decl_stmts.append("cdef public dict _mx_collect_cache\n")
+        decl_stmts.extend(f'cdef dict {name}\n' for name in sorted(self.module.visitor.input_fields.get(cls_name, ())))
         # What an item holds from shared inputs (holds.HoldTable)
         decl_stmts.extend(holds.pxd_declarations(cls_info))
         for cells in cls_info.cells.values():
@@ -548,6 +557,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         resolver=None,
         cells_kinds=None,
         ref_kinds=None,
+        collect_modules=None,
     ) -> None:
         """Parse ``source`` and record the module info and package.
 
@@ -566,6 +576,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._resolver = resolver
         self._cells_kinds = cells_kinds or {}
         self._ref_kinds = ref_kinds or {}
+        self._collect_modules = collect_modules or {}
         self.helper_providers = set()
         self._uses_native_round = False
         self.dense_entries = {}
@@ -629,6 +640,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         from modelx_cython import native_math
         node, lowered = native_math.lower(node, cls_info, cells)
         self._math_calls += lowered
+        if self._native_collect_shapes:
+            node = collect.native_collect.field_reads(
+                node, cls_info, self._native_collect_shapes,
+                self._collect_record_refs.get(cls_info.name, {}), cells)
         return node
 
     def _bind_declared_helpers(self, node, cls_info, cells):
@@ -654,6 +669,21 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._held_names = Names(self._module_node)
         self._held_pins = {}
         self._math_calls = 0
+        self._native_collect_shapes = collect.native_shapes(self.module)
+        self._collect_functions = []
+        self._collect_reinitializers = {}
+        self._collect_record_refs = {}
+        self._collect_factories = {}
+        if self._native_collect_shapes:
+            self.helper_providers.add(collect.native_collect.PROVIDER)
+            for node in self._module_node.body:
+                if isinstance(node, cst.ClassDef) and node.name.value in self.module.classes:
+                    cls_name = node.name.value
+                    formula, fields = collect.native_collect.factory(
+                        node, self.module.classes[cls_name], self._native_collect_shapes)
+                    if fields:
+                        self._collect_record_refs[cls_name] = fields
+                        self._collect_factories[cls_name] = formula
         return self.wrapper.visit(self)
 
     def _pin_held_item(self, owner, producer):
@@ -719,6 +749,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             module = module.with_changes(body=(*module.body, *roots))
         if self._math_calls:        # native math-module calls compare against the math module
             module = module.with_changes(body=(*module.body, cst.parse_statement(f'{MX_SYS_MOD}._mx_math_init()\n')))
+        if getattr(self, '_collect_hooks', False):
+            module = module.with_changes(body=(*module.body, *collect.evaluator(
+                self.module.spec.policy.collect_workers, self._collect_dots), *self._collect_functions))
         # Dense cache values left unwritten at allocation, installed when the module is imported
         values = ''.join(value_storage.functions(cls) for cls in self.module.classes.values())
         if values:
@@ -854,6 +887,30 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                               for line in holds.py_declarations(self.module.classes[cls_name]))
             decl_stmts.extend(cst.parse_statement(line)
                               for line in value_storage.py_declarations(self.module.classes[cls_name]))
+            if cls_name in self.module.visitor.collect_spaces:
+                self._collect_dots = '.' * self.module.fqname.count('.')
+                members, child_bindings_known = collect.member_specs(original_node, cls_info, self._collect_modules)
+                native_layouts = self._native_collect_shapes.get(cls_name)
+                reinitializer = self._collect_reinitializers.get(cls_name)
+                generated = collect.hook(original_node, cls_name, members, child_bindings_known,
+                                         dots=self._collect_dots,
+                                         reuse=collect.reuses_items(self.module.visitor, cls_name),
+                                         native_layouts=native_layouts,
+                                         reinitialize=reinitializer.name.value if reinitializer is not None else None)
+                if generated is not None:
+                    self._collect_hooks = True
+                    if reinitializer is not None:
+                        self._collect_functions.append(reinitializer)
+                    if native_layouts is not None:
+                        self._collect_functions.extend(cst.parse_module(
+                            collect.native_collect.gathering(native_layouts, cls_name)).body)
+                    constructor, hook = generated
+                    body = tuple(
+                        stmt.with_changes(body=constructor)
+                        if isinstance(stmt, cst.FunctionDef) and stmt.name.value == '_mx_collect_item'
+                        else stmt for stmt in updated_node.body.body)
+                    updated_node = updated_node.with_changes(
+                        body=updated_node.body.with_changes(body=(*body, *hook)))
             decorator = cst.Decorator(
                 decorator=cst.Attribute(value=cst.Name(CY_MOD), attr=cst.Name("cclass"))
             )
@@ -1035,13 +1092,25 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             meth_name = original_node.name.value
             cls_info = self.module.classes[cls_name]
 
+            if meth_name == '_mx_space_formula' and cls_name in self._collect_factories:
+                return self._collect_factories[cls_name]
+
             if meth_name == '__init__':
                 initializers = []
+                reused_caches = []
+                retains_caches = False
                 for cell in cls_info.cells.values():
                     if cell.uses_native_numeric_cache:
-                        initializers.append(cst.parse_statement(
-                            f'self._v_{cell.name} = {numeric_cache.constructor(cell)}\n'
-                        ))
+                        cache = f'self._v_{cell.name}'
+                        allocate = cst.parse_statement(f'{cache} = {numeric_cache.constructor(cell)}\n')
+                        initializers.append(allocate)
+                        if collect.retains_numeric_cache(cell):
+                            reused_caches.append(cst.parse_statement(f'{cache}.reset()\n'))
+                            retains_caches = True
+                        else:
+                            reused_caches.append(allocate)
+                if retains_caches:
+                    self._collect_reinitializers[cls_name] = collect.reinitialize_root(cls_name, updated_node, reused_caches)
                 return updated_node.with_changes(body=updated_node.body.with_changes(
                     body=(*updated_node.body.body, *initializers)))
 
@@ -1132,8 +1201,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             elif meth_name == "__delitem__" and cls_name in self.module.visitor.itemspace_classes:
                 updated_node = _releasing_delitem(updated_node, cls_name)
 
-            elif meth_name[:2] == "__":
-                # Special methods
+            elif (meth_name[:2] == "__" or cls_name in self.module.visitor.collect_spaces
+                  and collect.is_accessor(original_node)):
+                # Special methods and the generated Collect property are not Cells.
                 pass
 
             else:
