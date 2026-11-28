@@ -1,5 +1,4 @@
-"""audit-routes P3: the export's generic collect loop builds and frees each policy root through the
-class's generated construction and release (D116), as the evaluator and the direct route do.
+"""The generic Collect loop uses the compiled class to create and release each policy root.
 
 The generic loop runs when the evaluator cannot: under a profile or trace function, inside another
 collect, for non-native coordinates, or with workers but no parallel reuse. Its value equals live,
