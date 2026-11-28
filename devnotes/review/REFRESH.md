@@ -17,7 +17,7 @@ The completed MYGA retained-state comparison is in [the Collect description](COM
 
 On the 34,300-policy MYGA book, Fast SEC Direct used 2,080,596 instructions per policy and the Collect compiler's Direct route used 2,080,600. Native Collect used 1,877,121, 9.8% below Direct. The upstream compiler's Direct control used 8,456,011. These are medians of two fresh one-worker instruction runs, each checked against live cash flows.
 
-The refresh completed 280 checked timing and memory runs. Its released SEC Direct section used the generic compiler recipe. That recipe omitted the documented `infer_types=True, cpow=True` module directives, so the DIA and VUL failures below apply to that recipe. Across the ten generic pairs, Fast SEC elapsed time was 0.152–0.250× upstream and instructions were 0.228–0.306× upstream. A separate twelve-product pass with the documented SEC settings is in progress. The build durations are single build observations from a queue with up to six simultaneous builds. [DIA build recipe](https://github.com/lifelib-dev/lifelib/blob/20d4daef3281d538b3fbda6d0fb951fcceb3a6f4/lifelib/libraries/uslib/products/deferred_income_annuity/model-sec.md#L1241) · [VUL build recipe](https://github.com/lifelib-dev/lifelib/blob/20d4daef3281d538b3fbda6d0fb951fcceb3a6f4/lifelib/libraries/uslib/products/variable_ul/model-sec.md#L977)
+The refresh completed 280 checked timing and memory runs. Its released SEC Direct section used the generic compiler recipe. That recipe omitted the documented `infer_types=True, cpow=True` module directives, so the DIA and VUL failures below apply to that recipe. The corrected PR1 comparison uses lifelib's documented build and includes successful upstream runs for all twelve products. The initial build durations below are single observations from a queue with up to six simultaneous builds. [Corrected PR1 benchmark report](SEC-BUILD-BENCHMARKS.md)
 
 For the three compiled Collect products, Direct instructions changed by at most 0.08% between the compiler branches. Collect used 7.5–9.8% fewer instructions. Collect compilation took 8.0–13.1% longer than Direct on the Collect compiler. The 4w scaling limit was DIA at 1.83×. DIA Collect's four-worker median was 2.340 s compared with 2.405 s for DIA Direct.
 
@@ -25,7 +25,7 @@ The full DV01 live totals were 129,960.61614055187 and 157,856.97087237984 for D
 
 All wall and RSS entries are median [minimum–maximum] across five fresh processes. Retired instruction rows use two independent one-worker counter passes. Translation and native build durations are separate stages.
 
-## Released SEC products with Direct
+## Released SEC products with Direct under the earlier generic recipe
 
 | Product | Book | Compiler | µs/policy | CPU seconds | Instructions/policy | Peak MiB | Translation + C build seconds |
 | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |

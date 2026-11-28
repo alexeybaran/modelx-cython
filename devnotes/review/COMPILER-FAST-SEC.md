@@ -23,29 +23,29 @@ The generated-source tests now inspect the relevant calls and operands through t
 
 ## Evidence
 
-The figures below use the generic compiler recipe on the same ordered book for each pair. That recipe omitted the module directives in lifelib's documented SEC build. The upstream DIA and VUL attempts therefore do not measure whether the shipped build succeeds. The ten generic pairs remain measurements of that configuration. A matched rerun with the documented SEC settings is in progress. Each row uses the Direct route with one worker and reports the median of five alternating fresh-process rounds on WSL2, with free-threaded CPython 3.14.8, the GIL off and Cython 3.3.2.
+All 12 released SEC products build on both compilers and match live modelx when both use lifelib's documented native build settings. Fast SEC runs **2.71–6.16× as fast** and uses **55–76% fewer instructions per policy** across the twelve pairs. Each pair uses the Direct route with one worker and the same ordered book. Times are medians of five alternating fresh-process rounds on WSL2, with free-threaded CPython 3.14.8, the GIL off and Cython 3.3.2.
 
-| SEC product | Policies | Upstream µs/policy | Fast SEC µs/policy | Fast SEC / upstream instructions |
-| --- | ---: | ---: | ---: | ---: |
-| DIA | 12,000 | See build note | 443.3 | — |
-| FIA | 10,900 | 1,702.7 | 333.7 | 0.306× |
-| IUL | 3,500 | 5,768.1 | 1,031.8 | 0.270× |
-| MYGA | 34,300 | 1,948.3 | 296.6 | 0.246× |
-| RILA | 27,000 | 1,932.7 | 397.0 | 0.246× |
-| SPIA | 13,200 | 1,235.9 | 287.3 | 0.299× |
-| Term | 31,900 | 622.8 | 155.8 | 0.275× |
-| ULSG | 9,000 | 1,972.9 | 367.2 | 0.300× |
-| UL | 9,500 | 1,917.6 | 311.2 | 0.267× |
-| VA | 8,000 | 2,996.2 | 499.0 | 0.228× |
-| VUL | 5,300 | See build note | 780.9 | — |
-| WholeLife | 13,900 | 1,114.5 | 185.8 | 0.284× |
-| SEC DV01 full report | 1,050 | — | 13,965.7 | — |
+| SEC product | Policies | Upstream µs/policy | Fast SEC µs/policy | Fast SEC / upstream instructions | Elapsed speedup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| DIA | 12,000 | 1,293.8 | 477.0 | 0.455× | 2.71× |
+| FIA | 10,900 | 1,644.8 | 351.6 | 0.314× | 4.68× |
+| IUL | 3,500 | 5,064.8 | 975.0 | 0.309× | 5.19× |
+| MYGA | 34,300 | 1,830.8 | 297.4 | 0.267× | 6.16× |
+| RILA | 27,000 | 2,004.7 | 417.2 | 0.244× | 4.80× |
+| SPIA | 13,200 | 1,038.7 | 293.5 | 0.439× | 3.54× |
+| Term | 31,900 | 594.6 | 156.7 | 0.296× | 3.80× |
+| ULSG | 9,000 | 1,843.8 | 306.7 | 0.307× | 6.01× |
+| UL | 9,500 | 1,894.8 | 320.4 | 0.275× | 5.91× |
+| VA | 8,000 | 2,698.8 | 516.1 | 0.259× | 5.23× |
+| VUL | 5,300 | 3,566.2 | 808.8 | 0.341× | 4.41× |
+| WholeLife | 13,900 | 1,272.5 | 266.5 | 0.296× | 4.77× |
+| SEC DV01 full report | 1,050 | — | 13,965.7 | — | — |
 
-For DIA and VUL, lifelib's build sets `infer_types=True, cpow=True` on the generated Cython class module and uses `-ffp-contract=off` with GCC. Without the module directives, Cython's complex inference led to `complex types are unordered` in our generic compile. These settings can also affect models whose generic builds succeeded. [DIA build recipe](https://github.com/lifelib-dev/lifelib/blob/20d4daef3281d538b3fbda6d0fb951fcceb3a6f4/lifelib/libraries/uslib/products/deferred_income_annuity/model-sec.md#L1241) · [VUL build recipe](https://github.com/lifelib-dev/lifelib/blob/20d4daef3281d538b3fbda6d0fb951fcceb3a6f4/lifelib/libraries/uslib/products/variable_ul/model-sec.md#L977)
+Lifelib's build sets `infer_types=True, cpow=True` on the generated Cython class module and uses `-ffp-contract=off` with GCC. Applying these settings to both arms restored the DIA and VUL upstream builds. Upstream instruction counts also fell for all ten products that had compiled under the generic recipe, by 2.3–31.8%. The largest changes were SPIA, IUL and VA. [Build procedure and per-product comparison](SEC-BUILD-BENCHMARKS.md)
 
 The SEC DV01 row measures a full report with one ESG path and three closes. Fast SEC took 14.664 s at one worker and 3.530 s at four, with all 72 results matching live modelx bit for bit. The example requires dynamic Reference export and has no matched upstream result.
 
-The detailed benchmark report includes elapsed ranges, peak RSS, translation time and native build time. All 12 exact review CI jobs passed across Windows, Linux and macOS on standard Python 3.12 and free-threaded Python 3.14. [Benchmark report](REFRESH.md) · [Exact CI](https://github.com/alexeybaran/modelx-cython/actions/runs/46147767105)
+The detailed benchmark report includes elapsed ranges, peak RSS, translation time and native build time. All 12 exact review CI jobs passed across Windows, Linux and macOS on standard Python 3.12 and free-threaded Python 3.14. [Released SEC report](SEC-BUILD-BENCHMARKS.md) · [SEC DV01 results](REFRESH.md#full-sec-dv01-and-cs01-report) · [Exact CI](https://github.com/alexeybaran/modelx-cython/actions/runs/46147767105)
 
 The earlier census remains available with its original pins and limitations. It documented an LTC Japan allocation and instruction-count trade involving `Projection.care_surv`. The owner accepted the earlier result. The current release comparison covers supported SEC workloads. [Earlier full census](https://github.com/alexeybaran/modelx-cython/blob/c39337225c8d4097bb93b4cd540c547e569ecaa4/devnotes/PR-DESCRIPTION.md)
 
