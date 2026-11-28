@@ -21,6 +21,7 @@ jobs:
         python: ['3.10', '3.12', '3.14', '3.14t', '3.13t']
         suite: [standard]
     env: &runtime-env
+      CYTHON_VERSION: ${{ endsWith(matrix.python, 't') && '3.3.2' || '3.2.4' }}
       PYTHONIOENCODING: utf-8
       PYTEST_ADDOPTS: ${{ matrix.runner == 'windows-latest' && '--basetemp=C:/t' || '' }}
     steps: &runtime-steps
@@ -42,7 +43,7 @@ jobs:
               modelx=d41b2d2fdeca5ad42aae322158450aa5136f5f50
               ;;
             Regional)
-              compiler=8ad30743bb15bc44894b12b579f9a7487bf35c62
+              compiler=71538272408396cfb01492e0cb464ed232b8067d
               modelx=d41b2d2fdeca5ad42aae322158450aa5136f5f50
               ;;
             *) exit 1 ;;
@@ -111,7 +112,7 @@ jobs:
             companions+=(./lifelib)
           fi
           python -m pip install --only-binary scipy,libcst,numpy,pandas \
-            "${companions[@]}" 'Cython==3.2.4' libcst setuptools MonkeyType numpy scipy \
+            "${companions[@]}" "Cython==$CYTHON_VERSION" libcst setuptools MonkeyType numpy scipy \
             'pytest==8.4.2' pytest-xdist 'pandas>=2.2.2' openpyxl psutil
           if [[ "$SUITE" == regional ]]; then
             python -m pip install --no-deps ./lifelib
@@ -174,9 +175,11 @@ jobs:
 
           free_threaded = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
           assert free_threaded == (os.environ["EXPECT_FREE_THREADED"] == "true")
+          cython_version = metadata.version("Cython")
+          assert cython_version == os.environ["CYTHON_VERSION"], cython_version
           if free_threaded:
               assert not sys._is_gil_enabled()
-          print(sys.version, "free-threaded:", free_threaded)
+          print(sys.version, "free-threaded:", free_threaded, "Cython:", cython_version)
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
               print(f"COMPILER_PATH={(work / 'compiler').as_posix()}", file=env)
               print(f"LIFELIB_PATH={(work / 'lifelib').as_posix()}", file=env)
