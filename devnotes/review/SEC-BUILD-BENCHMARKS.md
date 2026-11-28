@@ -82,6 +82,44 @@ The diagnostic below reused the Fast SEC binaries and ordered books from the pai
 
 Removing the waits between batches improved four-worker time on all four models with the same end-only cleanup. For MYGA the waits accounted for 2.194 s of the 2.801 s recovered. Median process CPU time fell from 15.311 s to 11.076 s at that step. DIA still scaled only 1.40×, and FIA and RILA were below 2.5× in this matched diagnostic. The earlier driver collected explicitly every 64 projections at one worker and imposed no explicit cleanup at four workers. Its scaling figures therefore included the effect of different cleanup schedules. The matched upstream table above uses common batching for both compilers. The whole-book test was run on Fast SEC only.
 
+## Whole-book Direct and Collect scaling
+
+The comparison used the same ordered CSV books and cash-flow output as above. It alternated all six configurations in five fresh processes per configuration, on WSL2 with a Ryzen 7 5800H and free-threaded CPython 3.14.8. The GIL stayed off. One-worker runs used Linux CPU 0 and four-worker runs used Linux CPUs 0, 2, 4 and 6 on four separate physical cores. The policy table was loaded before timing to confirm the book size. Each Direct output and each Collect total matched live modelx.
+
+Direct used the whole-book queue, deleted each public policy item and explicitly collected garbage once at the end at both worker counts. Collect used one public call with its ordinary garbage-collection behavior and temporary policy items. PR1 used the same binaries as the previous section. PR2 used compiler `0cb1cb7f9dfeac4bff45df4ff0b96780f2cd725f` and modelx `f83a55a0ca3b7f15896184234f2b8fd06a1da215`. Both used released lifelib `20d4daef3281d538b3fbda6d0fb951fcceb3a6f4`. The PR1 build had the documented explicit Cython directives and disabled floating-point contraction. PR2 Direct and Collect used the same default native build settings as each other. Three MYGA rounds that overlapped the FIA build were discarded and replaced.
+
+| Model | Projections | Route | 1w wall s [min–max] | 4w wall s [min–max] | Scaling | Process CPU s, 1w → 4w | 4w peak MiB |
+|---|---:|---|---:|---:|---:|---:|---:|
+| MYGA | 34,300 | PR1 Direct | 7.105 [7.078–7.464] | 2.391 [2.304–2.818] | 2.97× | 7.104 → 9.222 | 171.4 |
+| MYGA | 34,300 | PR2 Direct | 6.967 [6.939–7.269] | 2.352 [2.189–2.580] | 2.96× | 6.972 → 9.044 | 167.3 |
+| MYGA | 34,300 | PR2 Collect | 7.548 [7.271–7.965] | 2.344 [2.174–2.416] | 3.22× | 7.560 → 9.048 | 141.6 |
+| RILA | 27,000 | PR1 Direct | 7.663 [7.443–7.676] | 3.079 [3.058–3.548] | 2.49× | 7.670 → 12.070 | 197.8 |
+| RILA | 27,000 | PR2 Direct | 8.301 [7.930–8.339] | 3.513 [3.248–3.964] | 2.36× | 8.286 → 13.800 | 190.2 |
+| RILA | 27,000 | PR2 Collect | 8.145 [7.793–8.164] | 2.400 [2.346–2.661] | 3.39× | 8.139 → 9.285 | 140.2 |
+| FIA | 10,900 | PR1 Direct | 2.390 [2.359–2.437] | 0.980 [0.937–1.003] | 2.44× | 2.389 → 3.558 | 159.4 |
+| FIA | 10,900 | PR2 Direct | 2.391 [2.374–2.425] | 0.957 [0.928–0.960] | 2.50× | 2.388 → 3.434 | 161.3 |
+| FIA | 10,900 | PR2 Collect | 2.348 [2.338–2.354] | 0.786 [0.749–0.822] | 2.99× | 2.344 → 2.758 | 125.3 |
+| DIA | 12,000 | PR1 Direct | 3.691 [3.663–3.711] | 2.440 [2.373–2.521] | 1.51× | 3.689 → 4.327 | 163.8 |
+| DIA | 12,000 | PR2 Direct | 3.707 [3.690–3.752] | 2.429 [2.341–2.582] | 1.53× | 3.703 → 4.384 | 161.9 |
+| DIA | 12,000 | PR2 Collect | 3.630 [3.572–3.685] | 2.415 [2.391–2.467] | 1.50× | 3.642 → 4.215 | 143.9 |
+
+DIA spends about 1.53–1.55 seconds preparing shared premium data on the caller or one worker. A separate three-round control timed `Data.premium_array()`, `Data.premium_rows()` and `Data.premium_last()` before the projection stopwatch. They each group the same schedule by policy. The prepared projection took 2.167 / 0.753 seconds in PR2 Direct and 2.070 / 0.715 seconds in PR2 Collect, giving 2.88× and 2.89× scaling. Table preparation represents about 63% of the cold four-worker Collect time.
+
+The time in RILA and FIA moves in a different way. In PR2 Direct, RILA averaged 3.93 effective cores at 4w and FIA 3.59, calculated as process CPU divided by elapsed time. Their process CPU rose 67% and 44% from one worker to four. For Collect, the increases were 14% and 18%. The four-worker observer saw all four workers with roughly even CPU time in both routes. Direct creates each public policy item and removes it from the shared ItemSpace cache. The native Collect path reuses a private item per worker when safe and accumulates cash flows natively. At 4w, RILA's median minor faults fell from 26,544 in Direct to 6,028 in Collect, and FIA fell from 16,373 to 4,329.
+
+Separate hardware-counter runs measured one fresh process per configuration. The largest increase in retired instructions from 1w to 4w was 0.77% across these eight pairs. The following cycle changes measure the added execution cost per retired instruction.
+
+| Model | PR2 Direct CPI change, 1w → 4w | PR2 Collect CPI change, 1w → 4w |
+|---|---:|---:|
+| MYGA | +13% | +14% |
+| RILA | +52% | +19% |
+| FIA | +42% | +11% |
+| DIA | +10% | +16% |
+
+The RILA control split the original book into four consecutive index ranges and pinned each fresh one-worker Direct process to its own core. Running the same processes concurrently raised total CPU from about 8.03 s to 9.54–9.64 s over two alternating rounds, with essentially identical retired instructions. In the single-process PR2 Direct diagnostic with four threads, CPU rose from 7.90 s to 12.63 s. Concurrent execution alone imposes a measurable cost, with an additional penalty in the shared-process Direct path. The exact shared object or allocation site remains unresolved. RILA's generated `norm_cdf` passed the math module as a borrowed pointer on all three builds.
+
+For MYGA the four-worker medians were effectively equal. Its larger Collect scaling ratio comes from the higher measured one-worker median. In the later counter pair, one-worker results were 7.08 s for Collect and 7.11 s for Direct. An additional three-round check of one-worker Collect measured 7.05 s with the default garbage collection and 7.46 s with automatic collection disabled. The one-worker difference varied across measurement sessions.
+
 ## Impact on the earlier generic measurements
 
 The table below isolates the build-setting correction by using the same earlier one-worker cleanup schedule before and after the change. Upstream retired instructions dropped on every available earlier pair. SPIA changed most at 31.8%. The Fast SEC instruction differences were at most 0.1% except RILA, which fell 5.1%. WholeLife's elapsed change across those sessions was much larger than its instruction change. The fresh matched pair above is the basis for the current WholeLife speed ratio.
