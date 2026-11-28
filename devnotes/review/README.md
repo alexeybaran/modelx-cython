@@ -19,7 +19,7 @@ The final compiler diffs against the measured `1994dc2` and `9076e2f` trees cont
 - Both installed examples also ran as exported Python and as compiled packages with imports of `modelx` and `modelx_cython` blocked.
 - The scalar power qualification combines paired instruction counts and emitted source comparisons. FIA's generated sources are identical. MYGA and DV01 add native calls only at geometric MVA expressions. Existing power caching decisions match the controls. [Pinned scalar qualification archive](https://github.com/alexeybaran/modelx-cython/blob/46d1330/devnotes/review/PERFORMANCE.md)
 - All 12 exact hosted jobs passed. They installed the source pin pairs together on Linux, Windows and macOS for Python 3.12 and free-threaded 3.14. They ran both compiler suites, the Collect companion suites and released SEC examples. [Exact review workflow](https://github.com/alexeybaran/modelx-cython/actions/runs/46147767105)
-- The completed benchmark refresh uses the review heads in the table. PR1 compares all 12 released SEC products with the documented lifelib build on both sides. PR2 covers MYGA in live, exported and compiled execution, compiled RILA and DIA, and the full DV01 report. [Released SEC benchmarks](SEC-BUILD-BENCHMARKS.md) · [Collect and DV01 benchmarks](REFRESH.md)
+- The scaling refresh uses the review heads in the table. Compiled Direct and Collect cover all 12 released SEC products, BasicTerm_SC and the full MYGA DV01 report at one and four workers. The MYGA retained-state and live/exported comparison is in the Collect draft. [Updated compiled benchmark tables](SEC-BUILD-BENCHMARKS.md) · [MYGA memory and API](COMPILER-COLLECT.md)
 
 ## Repeat the installed example
 
@@ -51,6 +51,8 @@ python -m pip install \
 3. Review the compiler Collect diff against Fast SEC. Treat the optional lifelib example as a consumer after the corresponding compiler and modelx dependencies are available.
 
 The earlier broadly scoped [compiler PR #62](https://github.com/fumitoh/modelx-cython/pull/62), [modelx PR #288](https://github.com/fumitoh/modelx/pull/288) and [lifelib PR #191](https://github.com/lifelib-dev/lifelib/pull/191) are separate. Use these split branches to discuss replacement or submission order with the maintainer.
+
+The earlier Fast SEC and compiled Collect descriptions preserve the original benchmark runs, commit counts, activation rules and guarantees under their own pins. The original combined proposals also document the 57 converted Regional products, the older export protocol and the earlier Windows attribution, per-policy and per-scalar reports. [Original Fast SEC description](https://github.com/alexeybaran/modelx-cython/blob/c39337225c8d4097bb93b4cd540c547e569ecaa4/devnotes/PR-DESCRIPTION.md) · [Original compiled Collect description](https://github.com/alexeybaran/modelx-cython/blob/be40323abe7e5c5f8d12a7f1dbe7b2d89d77f5d9/devnotes/PR-DESCRIPTION-collect.md) · [Earlier Windows attribution](https://github.com/alexeybaran/modelx-benchmark-toolkit/blob/90ee8693a99ca1dfda785c2f2da2c577354a3c65/parallel/20261113/round3/windows-census/report-6379886/ATTRIBUTION-COLD.md)
 
 ### Open upstream compiler changes
 

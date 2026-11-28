@@ -9,7 +9,7 @@ The earlier generic harness omitted the documented SEC module directives. Cython
 1. Export the released product with its shipped spec and sample. The benchmark adds one Cell that totals monthly net cash flows, and a sample wrapper that runs the shipped sample and calls that Cell for the shipped points.
 2. After translation, put `# cython: infer_types=True, cpow=True` at the start of the generated `_mx_classes.py` for each arm. Retain Python's original C flags and append `-ffp-contract=off`. Confirm that GCC compiles the classes with `-O3` and the contraction flag.
 3. Build the native packages on the same WSL2 Ryzen 7 5800H host, using free-threaded CPython 3.14.8, Cython 3.3.2 and GCC 13.3.0. DIA and VUL were translated again. The other ten reuse the exact earlier translations, then rebuild their native packages with the documented settings. Their translation times describe that earlier translation stage.
-4. Use the same ordered book at both worker counts and check the GIL is off in every process. Delete each Direct policy ItemSpace after evaluating it at both worker counts. Pause after each batch of 512 projections to run generation-zero garbage collection with all work in that batch complete. This uses the same cleanup schedule on both compilers and avoids the memory buildup seen in the earlier four-worker trials.
+4. Use the same ordered book at both worker counts and check the GIL is off in every process. Delete each Direct policy ItemSpace after evaluating it at both worker counts. At one worker the Direct driver collects garbage every 512 projections on each compiler. At four workers a rolling queue keeps 64-projection tasks available while the caller runs generation-zero garbage collection after roughly 512 completed projections. The driver uses the same queue and cleanup on both compilers.
 5. Run five Direct timing rounds in fresh processes per compiler and worker count. Alternate the compiler order within each model. Pin one-worker jobs to separate physical cores, with up to four independent jobs at a time. Run four-worker measurements one process at a time on four physical cores. Use two separate one-worker instruction rounds per compiler with the same cleanup schedule. Validate each policy value and the aggregate against live modelx in every run. Wall time and peak RSS columns show the median and minimum–maximum range.
 
 For `BasicTerm_SC`, use lifelib's shipped basiclife sample and spec. The sample also evaluates the first and last model points to cover the whole book. The workload evaluates `pv_net_cf()` on the shipped 10,000-point book, repeating complete passes to get a useful timing interval. Each projection is recalculated after releasing the prior state. [Lifelib BasicTerm_SC documentation](https://github.com/lifelib-dev/lifelib/blob/20d4daef3281d538b3fbda6d0fb951fcceb3a6f4/doc/source/libraries/basiclife/BasicTerm_SC.rst)
@@ -18,54 +18,55 @@ The historical generic comparison uses identical books and the earlier one-worke
 
 ## Matched upstream comparison
 
-All 26 optimized builds succeeded. All 260 timing runs and 52 instruction runs passed live-value checks. For each compiler, 1w/4w is its one-worker median divided by its four-worker median. The scaling ratio divides Fast SEC’s factor by upstream’s factor, so values above 1 indicate greater four-worker scaling on Fast SEC.
+All 26 builds succeeded. The new four-worker receipts and the reused one-worker timings and instruction counts passed live-value checks. The one-worker cleanup and ordered books are the same in both scheduling protocols. The largest measured RSS among the rolling four-worker trials was 5,023.6 MiB. Each scaling factor divides the one-worker median by its four-worker median. The scaling ratio divides Fast SEC’s factor by upstream’s. MYGA DV01 uses its dedicated full-report driver and its own pinned model as described in [the Fast SEC description](COMPILER-FAST-SEC.md#evidence).
 
-| SEC product | Projections | Upstream 1w µs/projection | Fast SEC 1w µs/projection | Instruction reduction (upstream / Fast SEC) | 1w elapsed speedup | Upstream 1w/4w | Fast SEC 1w/4w | Scaling ratio (Fast SEC / upstream) |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| BasicTerm_SC | 100,000 | 89.9 | 33.9 | 2.59× | 2.65× | 2.07× | 1.66× | 0.80× |
-| DIA | 12,000 | 1,198.9 | 394.2 | 2.28× | 3.04× | 2.66× | 1.60× | 0.60× |
-| FIA | 10,900 | 1,662.2 | 288.2 | 3.34× | 5.77× | 3.42× | 1.75× | 0.51× |
-| IUL | 3,500 | 5,302.7 | 945.8 | 3.28× | 5.61× | 3.46× | 2.32× | 0.67× |
-| MYGA | 34,300 | 1,737.3 | 274.6 | 4.00× | 6.33× | 3.41× | 2.24× | 0.66× |
-| RILA | 27,000 | 2,184.4 | 374.8 | 4.32× | 5.83× | 2.34× | 2.24× | 0.96× |
-| SPIA | 13,200 | 992.4 | 226.1 | 2.37× | 4.39× | 3.45× | 2.37× | 0.69× |
-| Term | 31,900 | 574.4 | 103.4 | 3.80× | 5.55× | 3.04× | 2.34× | 0.77× |
-| ULSG | 9,000 | 1,934.0 | 333.3 | 3.40× | 5.80× | 3.50× | 2.18× | 0.62× |
-| UL | 9,500 | 1,712.5 | 271.7 | 3.81× | 6.30× | 3.18× | 1.93× | 0.61× |
-| VA | 8,000 | 3,210.1 | 427.4 | 4.03× | 7.51× | 3.46× | 1.78× | 0.51× |
-| VUL | 5,300 | 4,840.6 | 776.0 | 3.00× | 6.24× | 3.72× | 2.54× | 0.68× |
-| WholeLife | 13,900 | 1,102.6 | 173.1 | 3.61× | 6.37× | 2.99× | 1.94× | 0.65× |
+| Model | Projections | Upstream 1w µs/proj. | Fast SEC 1w µs/proj. | Upstream 4w µs/proj. | Fast SEC 4w µs/proj. | Instruction reduction (upstream / Fast SEC) | 1w elapsed speedup | 4w elapsed speedup | Upstream 1w/4w | Fast SEC 1w/4w | Scaling ratio (Fast SEC / upstream) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| BasicTerm_SC | 100,000 | 89.9 | 33.9 | 38.6 | 19.8 | 2.59× | 2.65× | 1.95× | 2.33× | 1.71× | 0.73× |
+| DIA | 12,000 | 1,198.9 | 394.2 | 437.0 | 245.3 | 2.28× | 3.04× | 1.78× | 2.74× | 1.61× | 0.59× |
+| FIA | 10,900 | 1,662.2 | 288.2 | 505.0 | 174.7 | 3.34× | 5.77× | 2.89× | 3.29× | 1.65× | 0.50× |
+| IUL | 3,500 | 5,302.7 | 945.8 | 1,417.7 | 412.8 | 3.28× | 5.61× | 3.43× | 3.74× | 2.29× | 0.61× |
+| MYGA | 34,300 | 1,737.3 | 274.6 | 520.5 | 130.1 | 4.00× | 6.33× | 4.00× | 3.34× | 2.11× | 0.63× |
+| RILA | 27,000 | 2,184.4 | 374.8 | 991.9 | 170.9 | 4.32× | 5.83× | 5.80× | 2.20× | 2.19× | 1.00× |
+| SPIA | 13,200 | 992.4 | 226.1 | 275.3 | 86.9 | 2.37× | 4.39× | 3.17× | 3.61× | 2.60× | 0.72× |
+| Term | 31,900 | 574.4 | 103.4 | 160.3 | 40.3 | 3.80× | 5.55× | 3.98× | 3.58× | 2.56× | 0.72× |
+| ULSG | 9,000 | 1,934.0 | 333.3 | 560.9 | 167.0 | 3.40× | 5.80× | 3.36× | 3.45× | 2.00× | 0.58× |
+| UL | 9,500 | 1,712.5 | 271.7 | 535.8 | 150.3 | 3.81× | 6.30× | 3.56× | 3.20× | 1.81× | 0.57× |
+| VA | 8,000 | 3,210.1 | 427.4 | 1,031.7 | 276.1 | 4.03× | 7.51× | 3.74× | 3.11× | 1.55× | 0.50× |
+| VUL | 5,300 | 4,840.6 | 776.0 | 1,500.7 | 340.3 | 3.00× | 6.24× | 4.41× | 3.23× | 2.28× | 0.71× |
+| WholeLife | 13,900 | 1,102.6 | 173.1 | 321.6 | 99.0 | 3.61× | 6.37× | 3.25× | 3.43× | 1.75× | 0.51× |
+| MYGA DV01 | 42,000 (1,050 × 40) | — | 349.1 | — | 84.1 | — | — | — | — | 4.15× | — |
 
 ## Detailed results by compiler
 
 | Model | Compiler | 1w µs/projection | 4w µs/projection | Instructions/projection | Peak MiB at 1w | Translation + C build seconds |
 | --- | --- | --- | --- | --- | --- | --- |
-| BasicTerm_SC | Upstream | 89.9 [89.3–91.2] | 43.5 [42.4–44.0] | 724,295 | 137.7 [137.6–137.7] | 5.6 + 20.2 |
-| BasicTerm_SC | Fast SEC | 33.9 [33.6–34.1] | 20.5 [20.2–20.8] | 279,236 | 112.4 [112.3–112.6] | 8.3 + 23.4 |
-| DIA_US_SEC | Upstream | 1,198.9 [1,188.7–1,485.9] | 451.5 [445.6–462.8] | 6,253,734 | 967.2 [967.2–967.3] | 37.3 + 117.6 |
-| DIA_US_SEC | Fast SEC | 394.2 [386.6–412.0] | 246.0 [230.1–308.7] | 2,747,358 | 122.1 [122.0–122.4] | 63.8 + 148.1 |
-| FIA_US_SEC | Upstream | 1,662.2 [1,569.0–2,200.2] | 486.6 [468.6–490.2] | 7,838,924 | 1,768.5 [1,768.5–1,768.8] | 55.3 + 138.3 |
-| FIA_US_SEC | Fast SEC | 288.2 [277.3–299.3] | 164.2 [159.9–172.2] | 2,347,003 | 109.1 [109.0–109.3] | 81.3 + 169.1 |
-| IUL_US_SEC | Upstream | 5,302.7 [4,962.6–6,669.4] | 1,532.6 [1,433.8–1,705.1] | 28,326,344 | 2,545.0 [2,544.9–2,545.2] | 58.3 + 131.3 |
-| IUL_US_SEC | Fast SEC | 945.8 [907.9–1,023.8] | 407.9 [390.1–447.9] | 8,646,047 | 107.4 [107.3–107.5] | 81.8 + 157.6 |
-| MYGA_US_SEC | Upstream | 1,737.3 [1,682.7–1,785.0] | 508.8 [501.2–512.7] | 7,632,400 | 1,352.0 [1,351.7–1,352.1] | 31.5 + 105.5 |
-| MYGA_US_SEC | Fast SEC | 274.6 [270.5–291.0] | 122.8 [116.7–130.1] | 1,907,245 | 126.1 [125.9–127.4] | 56.9 + 130.6 |
-| RILA_US_SEC | Upstream | 2,184.4 [1,861.1–2,550.7] | 933.8 [914.1–1,044.4] | 10,528,153 | 3,240.5 [3,240.4–3,240.6] | 45.0 + 148.0 |
-| RILA_US_SEC | Fast SEC | 374.8 [333.2–395.8] | 167.5 [165.4–187.5] | 2,437,989 | 119.3 [119.1–120.1] | 83.2 + 177.9 |
-| SPIA_US_SEC | Upstream | 992.4 [970.1–998.3] | 287.8 [281.5–299.8] | 5,445,860 | 669.2 [669.1–669.3] | 36.6 + 73.7 |
-| SPIA_US_SEC | Fast SEC | 226.1 [223.9–243.9] | 95.3 [89.2–102.3] | 2,296,397 | 106.1 [105.8–106.2] | 46.8 + 93.2 |
-| Term_US_SEC | Upstream | 574.4 [573.2–609.5] | 188.7 [185.9–194.8] | 3,615,600 | 313.3 [313.1–313.3] | 11.3 + 43.0 |
-| Term_US_SEC | Fast SEC | 103.4 [100.0–106.7] | 44.2 [41.5–46.4] | 950,274 | 104.1 [104.1–104.4] | 23.2 + 47.8 |
-| ULSG_US_SEC | Upstream | 1,934.0 [1,886.6–2,434.3] | 553.4 [537.6–573.8] | 8,958,046 | 1,422.7 [1,422.7–1,422.8] | 29.4 + 93.9 |
-| ULSG_US_SEC | Fast SEC | 333.3 [307.3–368.9] | 153.2 [136.3–162.6] | 2,633,860 | 103.1 [103.0–103.2] | 49.4 + 114.9 |
-| UL_US_SEC | Upstream | 1,712.5 [1,708.0–1,778.1] | 538.7 [530.9–542.4] | 9,554,512 | 1,027.3 [1,027.3–1,027.4] | 26.6 + 82.2 |
-| UL_US_SEC | Fast SEC | 271.7 [256.4–277.3] | 141.1 [138.0–146.8] | 2,507,849 | 102.2 [102.1–102.4] | 42.2 + 83.3 |
-| VA_US_SEC | Upstream | 3,210.1 [3,029.0–3,564.6] | 928.4 [847.9–973.8] | 12,255,825 | 2,803.2 [2,803.1–2,803.3] | 86.4 + 184.9 |
-| VA_US_SEC | Fast SEC | 427.4 [416.6–439.4] | 240.6 [238.4–266.8] | 3,042,807 | 113.6 [113.5–113.7] | 111.4 + 205.6 |
-| VUL_US_SEC | Upstream | 4,840.6 [3,901.3–5,638.3] | 1,300.1 [1,177.9–1,460.8] | 14,054,401 | 3,919.5 [3,919.3–3,919.8] | 41.3 + 109.1 |
-| VUL_US_SEC | Fast SEC | 776.0 [705.5–831.3] | 305.8 [300.5–325.2] | 4,680,194 | 107.4 [107.3–107.6] | 64.9 + 139.0 |
-| WholeLife_US_SEC | Upstream | 1,102.6 [1,082.9–1,121.3] | 368.6 [357.2–374.5] | 6,319,282 | 691.3 [691.3–691.4] | 26.5 + 80.1 |
-| WholeLife_US_SEC | Fast SEC | 173.1 [169.7–186.5] | 89.3 [87.4–102.3] | 1,749,570 | 103.8 [103.7–103.9] | 39.5 + 80.6 |
+| BasicTerm_SC | Upstream | 89.9 [89.3–91.2] | 38.6 [37.1–40.0] | 724,295 | 137.7 [137.6–137.7] | 5.6 + 20.2 |
+| BasicTerm_SC | Fast SEC | 33.9 [33.6–34.1] | 19.8 [18.4–20.9] | 279,236 | 112.4 [112.3–112.6] | 8.3 + 23.4 |
+| DIA_US_SEC | Upstream | 1,198.9 [1,188.7–1,485.9] | 437.0 [417.6–478.1] | 6,253,734 | 967.2 [967.2–967.3] | 37.3 + 117.6 |
+| DIA_US_SEC | Fast SEC | 394.2 [386.6–412.0] | 245.3 [242.3–267.9] | 2,747,358 | 122.1 [122.0–122.4] | 63.8 + 148.1 |
+| FIA_US_SEC | Upstream | 1,662.2 [1,569.0–2,200.2] | 505.0 [499.2–621.5] | 7,838,924 | 1,768.5 [1,768.5–1,768.8] | 55.3 + 138.3 |
+| FIA_US_SEC | Fast SEC | 288.2 [277.3–299.3] | 174.7 [171.7–178.4] | 2,347,003 | 109.1 [109.0–109.3] | 81.3 + 169.1 |
+| IUL_US_SEC | Upstream | 5,302.7 [4,962.6–6,669.4] | 1,417.7 [1,378.1–1,519.3] | 28,326,344 | 2,545.0 [2,544.9–2,545.2] | 58.3 + 131.3 |
+| IUL_US_SEC | Fast SEC | 945.8 [907.9–1,023.8] | 412.8 [400.1–421.9] | 8,646,047 | 107.4 [107.3–107.5] | 81.8 + 157.6 |
+| MYGA_US_SEC | Upstream | 1,737.3 [1,682.7–1,785.0] | 520.5 [512.6–530.4] | 7,632,400 | 1,352.0 [1,351.7–1,352.1] | 31.5 + 105.5 |
+| MYGA_US_SEC | Fast SEC | 274.6 [270.5–291.0] | 130.1 [128.3–132.7] | 1,907,245 | 126.1 [125.9–127.4] | 56.9 + 130.6 |
+| RILA_US_SEC | Upstream | 2,184.4 [1,861.1–2,550.7] | 991.9 [908.6–1,054.7] | 10,528,153 | 3,240.5 [3,240.4–3,240.6] | 45.0 + 148.0 |
+| RILA_US_SEC | Fast SEC | 374.8 [333.2–395.8] | 170.9 [168.6–174.1] | 2,437,989 | 119.3 [119.1–120.1] | 83.2 + 177.9 |
+| SPIA_US_SEC | Upstream | 992.4 [970.1–998.3] | 275.3 [272.8–280.0] | 5,445,860 | 669.2 [669.1–669.3] | 36.6 + 73.7 |
+| SPIA_US_SEC | Fast SEC | 226.1 [223.9–243.9] | 86.9 [86.2–89.0] | 2,296,397 | 106.1 [105.8–106.2] | 46.8 + 93.2 |
+| Term_US_SEC | Upstream | 574.4 [573.2–609.5] | 160.3 [157.2–164.7] | 3,615,600 | 313.3 [313.1–313.3] | 11.3 + 43.0 |
+| Term_US_SEC | Fast SEC | 103.4 [100.0–106.7] | 40.3 [39.1–43.1] | 950,274 | 104.1 [104.1–104.4] | 23.2 + 47.8 |
+| ULSG_US_SEC | Upstream | 1,934.0 [1,886.6–2,434.3] | 560.9 [548.3–593.2] | 8,958,046 | 1,422.7 [1,422.7–1,422.8] | 29.4 + 93.9 |
+| ULSG_US_SEC | Fast SEC | 333.3 [307.3–368.9] | 167.0 [165.3–167.8] | 2,633,860 | 103.1 [103.0–103.2] | 49.4 + 114.9 |
+| UL_US_SEC | Upstream | 1,712.5 [1,708.0–1,778.1] | 535.8 [531.3–542.0] | 9,554,512 | 1,027.3 [1,027.3–1,027.4] | 26.6 + 82.2 |
+| UL_US_SEC | Fast SEC | 271.7 [256.4–277.3] | 150.3 [149.0–154.6] | 2,507,849 | 102.2 [102.1–102.4] | 42.2 + 83.3 |
+| VA_US_SEC | Upstream | 3,210.1 [3,029.0–3,564.6] | 1,031.7 [850.3–1,080.9] | 12,255,825 | 2,803.2 [2,803.1–2,803.3] | 86.4 + 184.9 |
+| VA_US_SEC | Fast SEC | 427.4 [416.6–439.4] | 276.1 [268.2–299.3] | 3,042,807 | 113.6 [113.5–113.7] | 111.4 + 205.6 |
+| VUL_US_SEC | Upstream | 4,840.6 [3,901.3–5,638.3] | 1,500.7 [1,338.8–2,071.0] | 14,054,401 | 3,919.5 [3,919.3–3,919.8] | 41.3 + 109.1 |
+| VUL_US_SEC | Fast SEC | 776.0 [705.5–831.3] | 340.3 [332.1–372.5] | 4,680,194 | 107.4 [107.3–107.6] | 64.9 + 139.0 |
+| WholeLife_US_SEC | Upstream | 1,102.6 [1,082.9–1,121.3] | 321.6 [318.0–325.6] | 6,319,282 | 691.3 [691.3–691.4] | 26.5 + 80.1 |
+| WholeLife_US_SEC | Fast SEC | 173.1 [169.7–186.5] | 99.0 [93.4–107.2] | 1,749,570 | 103.8 [103.7–103.9] | 39.5 + 80.6 |
 
 ## Effect of the 512-projection batches on worker scaling
 
@@ -80,11 +81,11 @@ The diagnostic below reused the Fast SEC binaries and ordered books from the pai
 | MYGA | 34,300 | 8.092 | 5.657 | 5.050 | 7.738 | 2.856 | 1.43× | 2.71× |
 | RILA | 27,000 | 8.595 | 5.899 | 5.540 | 8.385 | 4.544 | 1.46× | 1.85× |
 
-Removing the waits between batches improved four-worker time on all four models with the same end-only cleanup. For MYGA the waits accounted for 2.194 s of the 2.801 s recovered. Median process CPU time fell from 15.311 s to 11.076 s at that step. DIA still scaled only 1.40×, and FIA and RILA were below 2.5× in this matched diagnostic. The earlier driver collected explicitly every 64 projections at one worker and imposed no explicit cleanup at four workers. Its scaling figures therefore included the effect of different cleanup schedules. The matched upstream table above uses common batching for both compilers. The whole-book test was run on Fast SEC only.
+Removing the waits between batches improved four-worker time on all four models with the same end-only cleanup. For MYGA the waits accounted for 2.194 s of the 2.801 s recovered. Median process CPU time fell from 15.311 s to 11.076 s at that step. DIA still scaled only 1.40×, and FIA and RILA were below 2.5× in this matched diagnostic. The earlier driver collected explicitly every 64 projections at one worker and imposed no explicit cleanup at four workers. Its scaling figures therefore included the effect of different cleanup schedules. The matched upstream table above now uses the common rolling queue. The whole-book test was run on Fast SEC only.
 
 ## Whole-book Direct and Collect scaling
 
-The comparison used the same ordered CSV books and cash-flow output as above. It alternated all six configurations in five fresh processes per configuration, on WSL2 with a Ryzen 7 5800H and free-threaded CPython 3.14.8. The GIL stayed off. One-worker runs used Linux CPU 0 and four-worker runs used Linux CPUs 0, 2, 4 and 6 on four separate physical cores. The policy table was loaded before timing to confirm the book size. Each Direct output and each Collect total matched live modelx.
+This focused comparison used the same ordered CSV books and cash-flow output as the main tables. It alternated all six configurations in five fresh processes per configuration, on WSL2 with a Ryzen 7 5800H and free-threaded CPython 3.14.8. The GIL stayed off. One-worker runs used Linux CPU 0 and four-worker runs used Linux CPUs 0, 2, 4 and 6 on four separate physical cores. The policy table was loaded before timing to confirm the book size. Each Direct output and each Collect total matched live modelx.
 
 Direct used the whole-book queue, deleted each public policy item and explicitly collected garbage once at the end at both worker counts. Collect used one public call with its ordinary garbage-collection behavior and temporary policy items. PR1 used the same binaries as the previous section. PR2 used compiler `0cb1cb7f9dfeac4bff45df4ff0b96780f2cd725f` and modelx `f83a55a0ca3b7f15896184234f2b8fd06a1da215`. Both used released lifelib `20d4daef3281d538b3fbda6d0fb951fcceb3a6f4`. The PR1 build had the documented explicit Cython directives and disabled floating-point contraction. PR2 Direct and Collect used the same default native build settings as each other. Three MYGA rounds that overlapped the FIA build were discarded and replaced.
 
@@ -119,6 +120,61 @@ Separate hardware-counter runs measured one fresh process per configuration. The
 The RILA control split the original book into four consecutive index ranges and pinned each fresh one-worker Direct process to its own core. Running the same processes concurrently raised total CPU from about 8.03 s to 9.54–9.64 s over two alternating rounds, with essentially identical retired instructions. In the single-process PR2 Direct diagnostic with four threads, CPU rose from 7.90 s to 12.63 s. Concurrent execution alone imposes a measurable cost, with an additional penalty in the shared-process Direct path. The exact shared object or allocation site remains unresolved. RILA's generated `norm_cdf` passed the math module as a borrowed pointer on all three builds.
 
 For MYGA the four-worker medians were effectively equal. Its larger Collect scaling ratio comes from the higher measured one-worker median. In the later counter pair, one-worker results were 7.08 s for Collect and 7.11 s for Direct. An additional three-round check of one-worker Collect measured 7.05 s with the default garbage collection and 7.46 s with automatic collection disabled. The one-worker difference varied across measurement sessions.
+
+## Fast SEC whole-book comparison
+
+These are Fast SEC-only timings on the same books, using the full task queue and one final cleanup. The first table reports the memory-bounded upstream pair.
+
+| Model | Projections | Fast SEC 1w µs/projection | Fast SEC 4w µs/projection | Scaling |
+| --- | --- | --- | --- | --- |
+| BasicTerm_SC | 100,000 | 25.6 [25.4–27.6] | 7.9 [7.7–8.2] | 3.22× |
+| DIA | 12,000 | 307.6 [305.2–309.2] | 203.3 [197.7–210.1] | 1.51× |
+| FIA | 10,900 | 219.2 [216.4–223.6] | 89.9 [86.0–92.1] | 2.44× |
+| IUL | 3,500 | 971.3 [932.1–1,022.8] | 327.8 [320.1–330.8] | 2.96× |
+| MYGA | 34,300 | 207.1 [206.4–217.6] | 69.7 [67.2–82.2] | 2.97× |
+| RILA | 27,000 | 283.8 [275.7–284.3] | 114.0 [113.3–131.4] | 2.49× |
+| SPIA | 13,200 | 215.2 [211.5–222.6] | 60.9 [59.1–63.0] | 3.54× |
+| Term | 31,900 | 90.8 [89.2–92.4] | 25.8 [24.7–26.3] | 3.52× |
+| ULSG | 9,000 | 329.7 [314.4–338.2] | 100.5 [95.2–112.6] | 3.28× |
+| UL | 9,500 | 311.6 [282.6–318.9] | 91.4 [86.2–92.9] | 3.41× |
+| VA | 8,000 | 377.4 [338.2–382.9] | 182.4 [176.4–194.6] | 2.07× |
+| VUL | 5,300 | 660.8 [612.2–731.4] | 247.1 [229.6–256.0] | 2.67× |
+| WholeLife | 13,900 | 183.4 [179.5–190.9] | 50.5 [48.5–54.6] | 3.63× |
+
+## Compiled Collect comparison
+
+Both compiled routes evaluate the same ordered book and return the same cash-flow output. Direct deletes each policy item inside the timed interval and queues the whole book in 64-projection tasks at four workers, with one explicit cleanup at the end. Collect uses a single public call per pass. All timings are medians of five alternating fresh-process rounds with the GIL off. Four workers run on separate physical cores.
+
+Compiler `0cb1cb7f9dfeac4bff45df4ff0b96780f2cd725f` and modelx `f83a55a0ca3b7f15896184234f2b8fd06a1da215` use the released lifelib text for the ordinary SEC models and BasicTerm_SC. The four products in the focused comparison above reuse those exact timing receipts. Each other comparison uses Direct and Collect on the same Collect-enabled build. The full MYGA DV01 result reuses its dedicated model benchmark with unreduced workload, and appears in the [Collect description](COMPILER-COLLECT.md#compiled-direct-and-collect-timing).
+
+| Model | Route | Projections | 1w µs/projection | 4w µs/projection | Scaling |
+| --- | --- | --- | --- | --- | --- |
+| BasicTerm_SC | Direct | 100,000 | 26.1 [24.7–28.6] | 7.9 [7.6–8.3] | 3.30× |
+| BasicTerm_SC | Collect | 100,000 | 25.4 [24.8–27.6] | 7.2 [7.1–7.3] | 3.51× |
+| DIA | Direct | 12,000 | 308.9 [307.5–312.7] | 202.4 [195.1–215.1] | 1.53× |
+| DIA | Collect | 12,000 | 302.5 [297.7–307.1] | 201.3 [199.2–205.6] | 1.50× |
+| FIA | Direct | 10,900 | 219.3 [217.8–222.5] | 87.8 [85.2–88.1] | 2.50× |
+| FIA | Collect | 10,900 | 215.4 [214.5–216.0] | 72.1 [68.7–75.4] | 2.99× |
+| IUL | Direct | 3,500 | 949.5 [911.8–976.5] | 353.1 [337.8–372.7] | 2.69× |
+| IUL | Collect | 3,500 | 942.2 [923.6–947.0] | 254.0 [241.7–270.1] | 3.71× |
+| MYGA | Direct | 34,300 | 203.1 [202.3–211.9] | 68.6 [63.8–75.2] | 2.96× |
+| MYGA | Collect | 34,300 | 220.0 [212.0–232.2] | 68.3 [63.4–70.4] | 3.22× |
+| RILA | Direct | 27,000 | 307.4 [293.7–308.8] | 130.1 [120.3–146.8] | 2.36× |
+| RILA | Collect | 27,000 | 301.7 [288.6–302.4] | 88.9 [86.9–98.6] | 3.39× |
+| SPIA | Direct | 13,200 | 211.7 [206.8–224.6] | 62.2 [58.1–63.7] | 3.40× |
+| SPIA | Collect | 13,200 | 219.7 [205.6–235.2] | 60.2 [59.4–62.2] | 3.65× |
+| Term | Direct | 31,900 | 92.9 [86.9–95.6] | 25.7 [25.3–27.1] | 3.62× |
+| Term | Collect | 31,900 | 94.5 [91.5–98.0] | 24.9 [23.7–26.3] | 3.79× |
+| ULSG | Direct | 9,000 | 311.8 [303.5–324.6] | 100.4 [93.9–101.5] | 3.10× |
+| ULSG | Collect | 9,000 | 308.9 [294.3–325.2] | 85.4 [84.6–90.6] | 3.62× |
+| UL | Direct | 9,500 | 305.8 [300.7–317.3] | 93.4 [89.0–99.5] | 3.28× |
+| UL | Collect | 9,500 | 298.0 [287.6–310.9] | 89.3 [85.2–91.6] | 3.34× |
+| VA | Direct | 8,000 | 367.0 [325.2–377.1] | 185.0 [175.8–223.2] | 1.98× |
+| VA | Collect | 8,000 | 367.2 [349.7–395.5] | 104.6 [100.3–109.5] | 3.51× |
+| VUL | Direct | 5,300 | 717.2 [674.4–722.5] | 292.2 [264.8–328.9] | 2.45× |
+| VUL | Collect | 5,300 | 582.3 [530.1–596.8] | 169.5 [156.5–204.3] | 3.43× |
+| WholeLife | Direct | 13,900 | 190.7 [187.4–198.0] | 56.4 [54.0–58.4] | 3.38× |
+| WholeLife | Collect | 13,900 | 192.9 [178.9–197.8] | 52.7 [51.9–54.3] | 3.66× |
 
 ## Impact on the earlier generic measurements
 
