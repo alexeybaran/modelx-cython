@@ -1,8 +1,8 @@
-name: Free-threaded allocation compatibility
+name: Windows free-threaded allocation compatibility
 
 on:
   push:
-    branches: [verify/allocation-compatibility]
+    branches: [verify/allocation-windows]
     paths: [.github/workflows/allocation-compatibility.yml]
 
 permissions:
@@ -10,36 +10,21 @@ permissions:
 
 jobs:
   allocation:
-    name: ${{ matrix.compiler }} / Cython ${{ matrix.cython }}
-    runs-on: ubuntu-latest
+    name: Direct / Windows 3.13.17t / Cython 3.3.2
+    runs-on: windows-latest
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        compiler: [Updated, Previous]
-        cython: ['3.2.4', '3.3.2']
     env:
+      COMPILER: 5186502062501beccf780a190712e6198b9b14fa
       MODELX: 7e6ac7a4018248c373a7c43ede951363a1d4cf10
       LIFELIB: 20d4daef3281d538b3fbda6d0fb951fcceb3a6f4
+      CYTHON_VERSION: '3.3.2'
       PYTHONIOENCODING: utf-8
     steps:
-      - name: Select compiler
-        id: compiler
-        shell: bash
-        env:
-          REVISION: ${{ matrix.compiler }}
-        run: |
-          case "$REVISION" in
-            Updated) compiler=5186502062501beccf780a190712e6198b9b14fa ;;
-            Previous) compiler=7957dc3beb9237c779872bb479c2c9978b0ed296 ;;
-            *) exit 1 ;;
-          esac
-          printf 'sha=%s\n' "$compiler" >> "$GITHUB_OUTPUT"
       - name: Check out compiler
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: alexeybaran/modelx-cython
-          ref: ${{ steps.compiler.outputs.sha }}
+          ref: ${{ env.COMPILER }}
           path: compiler
           persist-credentials: false
       - name: Check out modelx
@@ -58,12 +43,10 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          python-version: '3.14.10t'
+          python-version: '3.13.17t'
       - name: Verify revisions and install dependencies
         shell: bash
         env:
-          COMPILER: ${{ steps.compiler.outputs.sha }}
-          CYTHON_VERSION: ${{ matrix.cython }}
           PYTHON_GIL: '0'
         run: |
           for entry in "compiler $COMPILER" "modelx $MODELX" "lifelib $LIFELIB"; do
@@ -84,7 +67,6 @@ jobs:
         shell: bash
         working-directory: ${{ runner.temp }}
         env:
-          CYTHON_VERSION: ${{ matrix.cython }}
           PYTHON_GIL: '0'
         run: |
           python - <<'PY'
@@ -97,26 +79,26 @@ jobs:
           import sysconfig
 
           assert bool(sysconfig.get_config_var("Py_GIL_DISABLED")) and not sys._is_gil_enabled()
-          assert sys.version_info[:3] == (3, 14, 10)
+          assert sys.platform == "win32" and sys.version_info[:3] == (3, 13, 17)
           assert metadata.version("Cython") == os.environ["CYTHON_VERSION"]
           work = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
           for name, checkout in (("modelx_cython", "compiler"), ("modelx", "modelx"), ("lifelib", "lifelib")):
               module = importlib.import_module(name)
               dist = metadata.distribution(name)
               info = json.loads(dist.read_text("direct_url.json"))
-              assert info["url"] == (work / checkout).as_uri(), info
+              assert info["url"].casefold() == (work / checkout).as_uri().casefold(), info
               assert Path(module.__file__).resolve().is_relative_to(Path(dist.locate_file("")).resolve())
               assert not Path(module.__file__).resolve().is_relative_to(work)
           print(sys.version, "GIL enabled:", sys._is_gil_enabled(), "Cython:", metadata.version("Cython"))
           PY
-          S="$GITHUB_WORKSPACE/compiler"
+          S=$(python -c 'import os; from pathlib import Path; print((Path(os.environ["GITHUB_WORKSPACE"]) / "compiler").resolve().as_posix())')
           tests="$S/modelx_cython/tests/compiled/test_value_storage.py"
           result=0
           for repeat in 1 2 3; do
             xml="repeat-$repeat.xml"
             printf '\n## Repetition %s\n\n' "$repeat" >> "$GITHUB_STEP_SUMMARY"
             if python -m pytest --import-mode=importlib --rootdir "$S" -p no:cacheprovider \
-              -q -rfEs --tb=short --basetemp="$RUNNER_TEMP/allocation-$repeat" --junitxml="$xml" \
+              -q -rfEs --tb=short --basetemp="C:/t-alloc-$repeat" --junitxml="$xml" \
               "$tests::test_unwritten_values_of_a_locked_space" \
               "$tests::test_unwritten_values_after_pickle_and_copy"; then
               exit_code=0
