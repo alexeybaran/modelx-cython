@@ -1,5 +1,7 @@
 # Matched SEC benchmark results
 
+This page is the archive for the earlier performance qualification. See the [current refresh](REFRESH.md) for measurements on the review heads.
+
 These results compare upstream compiler d22426f with measured Fast SEC compiler 5186502, using modelx fec516d and lifelib 20d4dae. The final shared scalar adjustment has its own paired results below. The review packaging changes leave compiler source identical to the final measured source.
 
 WSL2 on the same eight-core Ryzen 7 5800H, free-threaded CPython 3.14.8 with GIL off. Equal ordered books within each pair. Wall medians are five alternating fresh-process rounds and instructions are separate hardware-counter passes. Runs compare required values with live modelx.

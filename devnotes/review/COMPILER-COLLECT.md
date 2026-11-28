@@ -32,28 +32,17 @@ Live modelx records each Collect invocation as one dependency node. Reads of sha
 
 Compiled Collect keeps eligible numeric fields and subtotals in native storage. Compiled readers can consume those results directly, with Python views created when needed. Python-valued outputs and native fields can coexist. Parallel subtotal combination can change floating-point rounding. Shared inputs continue to follow the exported lock declarations.
 
-## Measured memory savings
+## Memory and runtime evidence
 
-Historical one-worker MYGA SEC full projections used the same book and cash-flow total on both routes. Direct retained all policies during measurement, and the driver performed no policy deletion. These are median peak RSS values from five fresh-process pairs.
+The MYGA SEC comparison runs the same cash-flow projection in live modelx, exported Python and compiled code. The memory runs leave Direct policy state in the model throughout the measurement. Collect disposes of per-policy calculation state. These are peak RSS medians and ranges from five alternating fresh-process pairs on the review heads, in MiB.
 
 | Mode | Policies | Direct MiB | Collect MiB | Reduction |
 | --- | ---: | ---: | ---: | ---: |
-| Live modelx | 14 | 754.3 | 119.0 | 84.2% |
-| Exported Python | 14 | 134.8 | 96.8 | 28.1% |
-| Compiled | 14 | 110.9 | 98.3 | 11.3% |
-| Exported Python | 1,050 | 3,286.1 | 97.5 | 97.0% |
-| Compiled | 1,050 | 1,205.7 | 99.3 | 91.8% |
+| Live modelx | 14 | 751.66 [751.34–751.88] | 123.23 [122.91–123.62] | 83.6% |
+| Exported Python | 14 | 140.30 [140.27–140.69] | 102.09 [101.85–102.13] | 27.2% |
+| Compiled | 14 | 116.57 [116.45–116.62] | 104.14 [104.05–104.32] | 10.7% |
 
-A separate timing comparison deleted Direct policies inside the stopwatch. The one-worker Direct driver also ran generation-zero GC every 64 policies. Timing compares equal books within each row and reports milliseconds per policy. Peak memory above is from the retained-state runs only.
-
-| Mode | Policies | Workers | Direct ms/policy | Collect ms/policy |
-| --- | ---: | ---: | ---: | ---: |
-| Live modelx | 28 | 1 | 407.675 | 129.591 |
-| Exported Python | 168 | 1 | 16.729 | 12.757 |
-| Compiled | 39,056 | 1 | 0.278 | 0.226 |
-| Compiled | 39,056 | 4 | 0.071 | 0.069 |
-
-These timings are supporting evidence from WSL2 with an eight-core Ryzen 7 5800H and free-threaded CPython 3.14.8. The compiled four-worker figures show near parity. Shared serial data preparation can limit cold scaling. The later SEC DV01 control used 1,050 policies, one path and three closes. It ran the full Collect report in 11.774 s at one worker and 3.185 s at four (3.70×) on its measured pin. The last shared scalar change was verified separately with paired native instruction counts and 72 matching report values. It does not replace that scaling receipt.
+The elapsed-time runs use equal books within each mode and delete each Direct policy item inside the timed interval. One-worker Direct also runs generation-zero GC every 64 policies. The separate full SEC DV01 comparison starts from the input CSV directory and checks all 72 values against the live reference. [Matched performance evidence](REFRESH.md)
 
 ## Installation and review
 

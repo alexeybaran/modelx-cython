@@ -11,19 +11,9 @@ Compiled scalar insurance models spend much of their time looking up Cell values
 
 ## Evidence
 
-The earlier matched census covered all 12 SEC products. They used **0.202–0.454×** upstream's instructions per policy. In the wider 95-model census, 73 passed on both compilers, nine passed only with the candidate, and 13 had the same failure class. The largest measured Regional increase on that earlier compiler was LTC Japan at **+4.76%**. The observed dense-cache policy in this series addresses the identified hash-cache path. This description makes no updated full-census claim. [Earlier compiler and base](https://github.com/alexeybaran/modelx-cython/compare/d22426fbac8637f84510902c2fa33b6466e5acb4...503b07c6f13d646ca4a15b020a18aea7c677a205)
+All 12 exact review CI jobs passed. The matched SEC refresh measures Direct over the same ordered book on both compilers. It checks cash-flow results against live modelx. The upstream DIA and VUL controls fail in Cython with `complex types are unordered`, so those rows have no speed ratio. The separate SEC DV01 example requires dynamic Reference export and has no comparable upstream compiler result. [Benchmark refresh](REFRESH.md) · [Exact review CI](https://github.com/alexeybaran/modelx-cython/actions/runs/46147767105)
 
-The later local WSL2 qualification measured 10 comparable SEC Direct workloads from matched books. At the measured Direct pin, instructions fell 69–77% across available upstream pairs, and the five-round elapsed measurements also improved. The upstream controls for DIA and VUL did not build under this local toolchain. SEC DV01 depends on a separately exported dynamic-Reference example and has no comparable upstream compile result.
-
-| Final scalar change versus the measured Direct tree | Policies | Instruction change |
-| --- | ---: | ---: |
-| FIA SEC | 32,700 | −0.010% |
-| MYGA SEC | 34,300 | −0.446% |
-| SEC DV01 | 1,050 | −0.444% |
-
-The final scalar comparison used three alternating fresh-process pairs on a Ryzen 7 5800H under WSL2, with free-threaded CPython 3.14.8 and the GIL off. FIA's generated class and runtime sources match byte for byte. MYGA and SEC DV01 change only the geometric MVA power expressions. Every DV01 run matched all 72 report values bit for bit. No new isolated elapsed-speed claim is made for the scalar change.
-
-The reviewer package includes the equal-book SEC table, compilation costs, paired scalar results and a runnable installed-wheel example. [Benchmark details](https://github.com/alexeybaran/modelx-cython/blob/review/fast-sec-collect-evidence/devnotes/review/PERFORMANCE.md) · [Exact review CI](https://github.com/alexeybaran/modelx-cython/actions/runs/46147767105)
+The earlier census remains available with its original pins and limitations. It documented an LTC Japan allocation and instruction-count trade involving `Projection.care_surv`. The owner accepted the earlier result. The current release comparison covers supported SEC workloads. [Earlier full census](https://github.com/alexeybaran/modelx-cython/blob/c39337225c8d4097bb93b4cd540c547e569ecaa4/devnotes/PR-DESCRIPTION.md)
 
 ## Review order
 

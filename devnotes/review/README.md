@@ -17,8 +17,9 @@ The final compiler diffs against the measured `1994dc2` and `9076e2f` trees cont
 
 - On WSL2 CPython 3.14.8t, built both compilers' wheels from their sdists and installed the two exact package pairs in separate fresh environments. Pip resolved dependencies normally and `pip check` passed. The build used Cython 3.3.2. Native sources expected in the sdist and wheel were present. The small example passed in live modelx, exported Python and native code with the GIL off. The Collect example checked both series access forms and retained Direct values on the same Space.
 - Both installed examples also ran as exported Python and as compiled packages with imports of `modelx` and `modelx_cython` blocked.
-- The paired instruction gate covers seven rows on the same ordered books. DV01 Direct improves by 0.444% on Fast SEC and 0.447% on the compiler with Collect. DV01 Collect improves by 0.457%. FIA is effectively flat on both routes. MYGA improves by 0.446% in Direct and 0.502% in Collect. The mixed DV01 export exactly reproduces the package that was measured. FIA is byte-identical and the generated MYGA and DV01 arithmetic changes are limited to geometric MVA. Existing power caching decisions match the controls.
-- The exact hosted workflow installs the source pin pairs together on Linux, Windows and macOS and runs both compiler suites, the Collect companion suites and the released SEC examples. This workflow is separate from the code proposed upstream. [Exact review workflow](https://github.com/alexeybaran/modelx-cython/actions/runs/46147767105)
+- The scalar power qualification combines paired instruction counts and emitted source comparisons. FIA's generated sources are identical. MYGA and DV01 add native calls only at geometric MVA expressions. Existing power caching decisions match the controls. [Pinned scalar qualification archive](https://github.com/alexeybaran/modelx-cython/blob/46d1330/devnotes/review/PERFORMANCE.md)
+- All 12 exact hosted jobs passed. They installed the source pin pairs together on Linux, Windows and macOS for Python 3.12 and free-threaded 3.14. They ran both compiler suites, the Collect companion suites and released SEC examples. [Exact review workflow](https://github.com/alexeybaran/modelx-cython/actions/runs/46147767105)
+- The benchmark refresh uses the review heads in the table. [Refresh scope and protocol](REFRESH.md)
 
 ## Repeat the installed example
 
@@ -51,4 +52,15 @@ python -m pip install \
 
 The earlier broadly scoped [compiler PR #62](https://github.com/fumitoh/modelx-cython/pull/62), [modelx PR #288](https://github.com/fumitoh/modelx/pull/288) and [lifelib PR #191](https://github.com/lifelib-dev/lifelib/pull/191) are separate. Use these split branches to discuss replacement or submission order with the maintainer.
 
-Git merge-tree checks against the open compiler heads found actual conflicts with #55–60. The most extensive, #60, overlaps power proof, runtime declarations, spec, configuration, tracing and tests. #57's conflict is in CLI integration. There is no need to speculate about resolving any of these until the maintainer chooses which changes to merge first.
+### Open upstream compiler changes
+
+These were checked with `git merge-tree` against the Fast SEC review head. Its base remains current upstream main.
+
+| Upstream PR | Proposed behavior | Merge overlap and retained behavior |
+| --- | --- | --- |
+| [#55](https://github.com/fumitoh/modelx-cython/pull/55) | Widen a mixture of Python `float` and NumPy `float64` arguments to C `double`. Log the other mixed-type fallbacks. | The tracer auto-merges. Combine the conflicting tracer regression coverage, new tests and release notes. Check the merged widening through typed entries. |
+| [#56](https://github.com/fumitoh/modelx-cython/pull/56) | Retain Python object returns for unsupported NumPy buffers and zero-dimensional arrays. | The builder auto-merges. Keep both test groups, including the independence of public object returns and eligible native memoryviews or held buffers. |
+| [#57](https://github.com/fumitoh/modelx-cython/pull/57) | Validate names before sampling and keep the prior translated output through preflight. | `cli.py` changes both directory replacement and translation order. Integrate the preflight before rotation and keep both ordinary translation and compile-only paths. |
+| [#58](https://github.com/fumitoh/modelx-cython/pull/58) | Validate and apply model-wide Cython directives in the spec. | Both sides edit spec validation, option defaults and generated build setup. Preserve documented upstream override behavior and reject incompatible directives. |
+| [#59](https://github.com/fumitoh/modelx-cython/pull/59) | Apply per-Cell `param_type` overrides. | The combined builder must feed the override into public signatures, storage choices and power classification. Retain Fast SEC's distinct checks on rebound formula parameters and require usable bounds before selecting dense storage. |
+| [#60](https://github.com/fumitoh/modelx-cython/pull/60) | Add opt-in `use_libm` for `math.exp`, `math.log` and `math.pow`. | Both sides change runtime helpers, the power pass, math Reference facts and dispatch. Reconcile the maintainer's chosen spec API and defaults, use one lowering path, and retest native arithmetic, rebinding, domain fallback and generated code. |

@@ -6,4 +6,4 @@ The Collect follow-up declares the Actual opening fields and Valuation cash flow
 
 Both review heads are based on lifelib main `fbafbaab44493f77bdd015ad09f0d770a6488ded`. The authored DV01 files are byte-identical to the earlier examples. The two changed files of the upstream G2++ source have the same executable syntax trees after removing docstrings. On the rebased sources, the 12 Direct live tests and 13 mixed live tests passed, including the 72 report values and both stored totals. The earlier compiled full-report qualification and scaling results keep their original lifelib pins.
 
-Review the Direct example after the exporter and compiler it needs. The Collect follow-up depends on the Collect modelx and compiler proposals. [Measured full report and scalar checks](https://github.com/alexeybaran/modelx-cython/blob/review/fast-sec-collect-evidence/devnotes/review/PERFORMANCE.md)
+Review the Direct example after the exporter and compiler it needs. The Collect follow-up depends on the Collect modelx and compiler proposals. [Full-report benchmark refresh](REFRESH.md)
